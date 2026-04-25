@@ -6,6 +6,9 @@ if TYPE_CHECKING:
 from utils.logger import logger
 
 def llm_response(message,avatar_session:'BaseAvatar',datainfo:dict={}):
+    # 这是“文本 -> 大模型 -> 分段文本 -> TTS”的桥接函数。
+    # 它的目标不是一次性生成完整答案，而是尽快把第一批可播报文本送出去，
+    # 从而降低直播场景里的主观等待时间。
     try:
         opt = avatar_session.opt
         start = time.perf_counter()
@@ -39,7 +42,8 @@ def llm_response(message,avatar_session:'BaseAvatar',datainfo:dict={}):
                 if msg is None:
                     continue
                 lastpos=0
-                #msglist = re.split('[,.!;:，。！?]',msg)
+                # 按标点拆分，是为了把流式结果切成适合立即播报的短句。
+                # 如果整段文字攒太久才发给 TTS，数字人会显得“思考很久才开口”。
                 for i, char in enumerate(msg):
                     if char in ",.!;:，。！？：；" :
                         result = result+msg[lastpos:i+1]
@@ -52,6 +56,7 @@ def llm_response(message,avatar_session:'BaseAvatar',datainfo:dict={}):
         end = time.perf_counter()
         logger.info(f"llm Time to last chunk: {end-start}s")
         if result:
+            # 最后可能会剩下一段没有标点的尾巴，这里补发，避免漏播。
             avatar_session.put_msg_txt(result,datainfo)
         
     except Exception as e:

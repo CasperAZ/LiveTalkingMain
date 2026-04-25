@@ -2,6 +2,9 @@ import soundfile as sf
 import resampy
 import numpy as np
 
+# 这个文件提供更偏“文件级”的音频处理辅助函数，
+# 与 utils/audio.py 中偏“字节流/数组级”的工具形成互补。
+
 def read_audio_file(file_path):
     # 使用soundfile库的read函数读取音频文件
     audio, sample_rate = sf.read(file_path)

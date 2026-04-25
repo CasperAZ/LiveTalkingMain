@@ -19,7 +19,7 @@ class BaseTTS:
         self.opt = opt
         self.parent = parent
 
-        #self.fps = opt.fps # 20 ms per frame
+        # TTS 最终也要落到“20ms 音频块”这个统一接口上。
         self.sample_rate = 16000
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
         self.input_stream = BytesIO()
@@ -28,6 +28,7 @@ class BaseTTS:
         self.state = State.RUNNING
 
     def flush_talk(self):
+        # 清空还没处理的文本，并把状态切到暂停。
         self.msgqueue.queue.clear()
         self.state = State.PAUSE
 
@@ -36,6 +37,7 @@ class BaseTTS:
             self.msgqueue.put((msg, datainfo))
 
     def render(self, quit_event):
+        # TTS 作为独立线程运行，持续消费文本队列。
         process_thread = Thread(target=self.process_tts, args=(quit_event,))
         process_thread.start()
     
@@ -46,6 +48,7 @@ class BaseTTS:
                 self.state = State.RUNNING
             except queue.Empty:
                 continue
+            # 具体的文本转音频逻辑由子类实现。
             self.txt_to_audio(msg)
         self.stop_tts()
         logger.info('ttsreal thread stop')

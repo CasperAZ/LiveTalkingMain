@@ -8,6 +8,7 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# IndexTTS2 通过 Gradio 接口工作，特点是会先把长文本拆句，再逐段生成音频。
 class IndexTTS2(BaseTTS):
     def __init__(self, opt, parent):
         super().__init__(opt, parent)

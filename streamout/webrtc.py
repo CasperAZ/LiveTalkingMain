@@ -20,6 +20,8 @@ class WebRTCOutput(BaseOutput):
         self._player = None
 
     def start(self) -> None:
+        # WebRTC 的真正连接建立由 RTCManager 负责，
+        # 这里保留空实现即可。
         """WebRTC 输出由 rtc_manager 管理，此处无需额外启动"""
         pass
 

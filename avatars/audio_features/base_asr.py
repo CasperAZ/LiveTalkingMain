@@ -33,6 +33,7 @@ class BaseASR:
 
         self.fps = opt.fps # 20 ms per frame
         self.sample_rate = 16000
+        # 与 BaseAvatar 保持一致：每个音频块按 20ms 切分。
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
         self.queue:Queue[AudioFrameData] = Queue()
         self.output_queue:Queue[AudioFrameData] = Queue()
@@ -43,11 +44,13 @@ class BaseASR:
         self.stride_left_size = opt.l
         self.stride_right_size = opt.r
         #self.context_size = 10
+        # feat_queue 里放的是给口型模型线程消费的特征 batch。
         self.feat_queue = Queue(maxsize=2)
 
         #self.warm_up()
 
     def flush_talk(self):
+        # 清掉还没消费的音频块，用于中断当前播报。
         self.queue.queue.clear()
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
@@ -57,6 +60,7 @@ class BaseASR:
     def get_audio_frame(self)->AudioFrameData:        
         try:
             if self.parent and self.parent.custom_audiotype>1: #播放自定义音频,优先播放完自定义动作,可以通过interrupt打断动作播放
+                # 自定义动作优先级更高，会直接覆盖普通 TTS 音频输入。
                 frame = self.parent.get_custom_audio_stream(self.parent.custom_audiotype)
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
@@ -65,6 +69,7 @@ class BaseASR:
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
+            # 上游没音频时，补静音帧，保持节拍连续。
             frame = np.zeros(self.chunk, dtype=np.float32)
             return AudioFrameData(data=frame, type=1, userdata={})
 
@@ -74,6 +79,7 @@ class BaseASR:
         return self.output_queue.get()
     
     def warm_up(self):
+        # 预填充一部分上下文，避免系统刚启动时特征窗口不够。
         for _ in range(self.stride_left_size + self.stride_right_size):
             audio_frame=self.get_audio_frame()
             self.frames.append(audio_frame.data)
@@ -104,6 +110,7 @@ class BaseASR:
         selected_feature = []
         selected_idx = []
         
+        # 因为音频特征和视频帧的时间分辨率不同，这里要先做索引换算。
         center_idx = int(vid_idx * feature_idx_multiplier) 
         left = int(center_idx - audio_feat_win[0]*feature_idx_multiplier)
         right = int(center_idx + audio_feat_win[1]*feature_idx_multiplier)
@@ -142,6 +149,7 @@ class BaseASR:
         :param feature_idx_multiplier: 用于将视频帧索引转换为特征索引的乘数，通常为 (特征提取的宽度 / 视频帧率)
         :return: 
         """
+        # 把长特征序列切成与视频帧对齐的小窗口。
         feature_chunks = []
         #start += 10
         #feature_idx_multiplier = 50./fps 

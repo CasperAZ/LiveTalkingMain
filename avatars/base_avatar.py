@@ -15,7 +15,14 @@
 #  limitations under the License.
 ###############################################################################
 #
-#  Avatar 基类 — 合并自 basereal.py，集成到 Async Pipeline
+#  Avatar 基类
+#
+#  这是每一路“数字人会话”的总控骨架。可以把它理解成一个流水线调度器：
+#  文本/音频输入 -> TTS/ASR 特征 -> 口型模型推理 -> 回贴到底图 -> 输出到 WebRTC/RTMP/虚拟摄像头。
+#  以后你要做快手适配时，这个文件非常关键，因为它决定了：
+#  1. 输入是怎样进入数字人会话的；
+#  2. 会话内部怎样并行跑 TTS、推理和输出；
+#  3. 最终媒体帧怎样统一发给不同输出通道。
 #
 
 import math
@@ -56,6 +63,14 @@ from utils.image import read_imgs,mirror_index
 
 @dataclass
 class AudioFrameData:
+    # data:
+    #   一个 20ms 左右的音频块，通常是 float32 单声道 PCM。
+    # type:
+    #   0 = 正常说话音频
+    #   1 = 静音占位音频
+    #   >1 = 自定义动作音频
+    # userdata:
+    #   附带的业务数据，比如 start/end、文本内容、TTS 参数等。
     data: NDArray[np.float32]
     type: int = 0  # 默认值
     userdata: dict = field(default_factory=dict)
@@ -64,6 +79,8 @@ class BaseAvatar:
     def __init__(self, opt):
         self.opt = opt
         self.sample_rate = 16000
+        # 项目统一把音频切成 20ms 一小块。
+        # 对 16k 采样率来说，20ms = 320 个采样点。
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms)
         self.sessionid = self.opt.sessionid
 
@@ -73,6 +90,10 @@ class BaseAvatar:
         self._record_audio_pipe = None
         self.width = self.height = 0
 
+        # 自定义动作状态：
+        # 0 表示正常说话驱动；
+        # 1 表示静音占位；
+        # >1 表示某种业务自定义动作编号。
         self.custom_audiotype = 0 # 0: normal, 1: sinlence, >1: custom audio
         self.custom_img_cycle = {}
         self.custom_audio_cycle = {}
@@ -81,6 +102,7 @@ class BaseAvatar:
         # self.custom_opt = {}
         self.__loadcustom()
 
+        # 这个队列是“模型推理线程”和“后处理/输出线程”之间的交接点。
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
@@ -99,6 +121,7 @@ class BaseAvatar:
         }
 
         if opt.tts in _tts_modules:
+            # 先 import，再 create，是为了触发对应模块里的 @register 装饰器。
             importlib.import_module(_tts_modules[opt.tts])
             self.tts = registry.create("tts", opt.tts, opt=opt, parent=self)
         else:
@@ -111,7 +134,8 @@ class BaseAvatar:
             'virtualcam': 'streamout.virtualcam'
         }
 
-        # 初始化 Output 模块
+        # Output 决定最终把媒体流送到哪里。
+        # 这一层是平台适配时非常适合扩展的地方。
         if opt.transport in _output_modules:
             try:
                 importlib.import_module(_output_modules[opt.transport])
@@ -121,16 +145,20 @@ class BaseAvatar:
         else:
             logger.error(f"Output transport {opt.transport} not found in map.")
 
-    # 如果系统没有使用 pipeline，或者为了向后兼容原来的 ttsreal.py
+    # 统一的“喂文本”入口。
+    # 外部通常不需要知道底层是如何经过 TTS / ASR / 推理的。
     def put_msg_txt(self, msg, datainfo:dict={}):
         if hasattr(self, 'tts'):
             self.tts.put_msg_txt(msg, datainfo)
     
     def put_audio_frame(self, audio_chunk:NDArray[np.float32], datainfo:dict={}): # 16khz 20ms pcm
+        # 统一的“喂音频块”入口。
+        # 不管音频来自 TTS、上传文件还是自定义动作，最后都走这里。
         if hasattr(self, 'asr'):
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
     def put_audio_file(self, filebyte, datainfo:dict={}): 
+        # 上传整段音频文件时，需要先解码，再切成固定大小的小块进入驱动链路。
         input_stream = BytesIO(filebyte)
         stream = self.__create_bytes_stream(input_stream)
         streamlen = stream.shape[0]
@@ -149,6 +177,7 @@ class BaseAvatar:
             idx += self.chunk
 
     def put_audio_filepath(self, filepath, datainfo:dict={}): 
+        # 与 put_audio_file 逻辑相同，只是输入改成了文件路径。
         stream = self.__create_bytes_stream(filepath)
         streamlen = stream.shape[0]
         idx = 0
@@ -166,6 +195,10 @@ class BaseAvatar:
             idx += self.chunk
     
     def __create_bytes_stream(self, byte_stream):
+        # 标准化音频输入规格：
+        # - 统一转成 float32
+        # - 多声道只取第一轨
+        # - 统一重采样到 16k
         stream, sample_rate = sf.read(byte_stream) # [T*sample_rate,] float64
         logger.info(f'[INFO]put audio stream {sample_rate}: {stream.shape}')
         stream = stream.astype(np.float32)
@@ -181,6 +214,10 @@ class BaseAvatar:
         return stream
 
     def flush_talk(self):
+        # 打断说话时，需要同时清掉：
+        # 1. TTS 还没合成的文本；
+        # 2. ASR 还没消费的音频块；
+        # 3. 自定义动作状态。
         if hasattr(self, 'tts') and hasattr(self.tts, 'flush_talk'):
             self.tts.flush_talk()
         if hasattr(self, 'asr') and hasattr(self.asr, 'flush_talk'):
@@ -196,6 +233,7 @@ class BaseAvatar:
     def __loadcustom(self):
         if not hasattr(self.opt, 'customopt') or not self.opt.customopt:
             return
+        # customopt 描述“静默时播什么动画/音频”。
         for item in self.opt.customopt:
             logger.info(item)
             input_img_list = glob.glob(os.path.join(item['imgpath'], '*.[jpJP][pnPN]*[gG]'))
@@ -215,10 +253,13 @@ class BaseAvatar:
             self.custom_index[key] = 0
 
     def notify(self, eventpoint:dict):
+        # 这里可以理解成“音频事件同步点”。
+        # 当前只是打日志，但很适合后续扩展成字幕、状态回调、平台通知等。
         if eventpoint and eventpoint.get('status'):
             logger.info("notify:%s", eventpoint)
 
     def start_recording(self):
+        # 录制功能是通过两个 ffmpeg 进程分别写视频裸流和音频裸流实现的。
         if self.recording:
             return
         command = ['ffmpeg',
@@ -276,6 +317,7 @@ class BaseAvatar:
     #         return size - res - 1 
     
     def get_custom_audio_stream(self, audiotype):
+        # 每次只取出一个 chunk 长度的音频，保持与主驱动节拍一致。
         idx = self.custom_audio_index[audiotype]
         stream = self.custom_audio_cycle[audiotype][idx:idx+self.chunk]
         self.custom_audio_index[audiotype] += self.chunk
@@ -287,6 +329,7 @@ class BaseAvatar:
         print('set_custom_state:', audiotype)
         if self.custom_audio_index.get(audiotype) is None:
             return
+        # 切换到某个动作状态，本质上就是切换后续静音阶段所使用的音频/图像序列。
         self.custom_audiotype = audiotype
         if reinit:
             self.custom_audio_index[audiotype] = 0
@@ -299,6 +342,7 @@ class BaseAvatar:
         return 1
         
     def inference(self, quit_event):
+        # 这个线程负责“音频特征 -> 口型推理结果”。
         length = self.get_avatar_length()
         index = 0
         count = 0
@@ -329,11 +373,13 @@ class BaseAvatar:
             current_speaking = not is_all_silence
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
+                # 没有说话时不跑模型，直接走静默帧/原始帧逻辑。
                 for i in range(self.batch_size):
                     idx = mirror_index(length, index)
                     self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
                     index = index + 1
             else:
+                # 只有检测到非静音时，才真的调用子类模型做推理。
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
                     index = 0
                 t = time.perf_counter()
@@ -356,6 +402,7 @@ class BaseAvatar:
         logger.info('baseavatar inference thread stop')
 
     def process_frames(self,quit_event):
+        # 这个线程负责把推理结果做成“最终可播放的完整画面”，然后送去输出层。
         enable_transition = False  # 设置为False禁用过渡效果，True启用
         
         _last_speaking = False
@@ -405,6 +452,7 @@ class BaseAvatar:
             else:
                 self.speaking = True
                 try:
+                    # 子类会实现 paste_back_frame，把预测出来的嘴部区域贴回到底图。
                     current_frame = self.paste_back_frame(res_frame,idx)
                 except Exception as e:
                     logger.warning(f"paste_back_frame error: {e}")
@@ -423,7 +471,7 @@ class BaseAvatar:
 
             cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             
-            # 使用统一输出接口推送视频帧
+            # 所有输出方式都统一走 output 接口，这样主流程不关心“发到哪里”。
             self.output.push_video_frame(combine_frame)
             self.record_video_data(combine_frame)
 
@@ -431,7 +479,7 @@ class BaseAvatar:
                 #frame,type,eventpoint = audio_frame
                 frame = (audio_frame.data * 32767).astype(np.int16)
 
-                # 使用统一输出接口推送音频帧
+                # 音频帧与视频帧在同一层往外推，便于保持时序一致。
                 self.output.push_audio_frame(frame, audio_frame.userdata)
                 self.record_audio_data(frame)
                 
@@ -442,6 +490,10 @@ class BaseAvatar:
         logger.info('baseavatar process_frames thread stop') 
 
     def render(self,quit_event):
+        # render 是会话真正启动的入口，会同时拉起：
+        # - TTS 线程
+        # - inference 线程
+        # - process_frames 线程
         self.quit_event = quit_event
         
         self.init_customindex()
@@ -461,10 +513,12 @@ class BaseAvatar:
         _totalframe=0
         while not quit_event.is_set(): 
             t = time.perf_counter()
+            # run_step() 每次推进一点音频驱动流程，相当于整个会话的节拍器。
             self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
             if buffer_size >= 5:
+                # 下游积压时主动降速，避免延迟持续放大。
                 logger.debug('sleep qsize=%d', buffer_size)
                 time.sleep(0.04 * buffer_size * 0.8)
         logger.info('baseavatar render thread stop')

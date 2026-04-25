@@ -8,6 +8,7 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# XTTS 的特点是先根据参考音频克隆出 speaker，再进行流式合成。
 @register("tts", "xtts")
 class XTTS(BaseTTS):
     def __init__(self, opt, parent):
@@ -28,6 +29,7 @@ class XTTS(BaseTTS):
         )
 
     def get_speaker(self,ref_audio,server_url):
+        # 第一步先把参考音频上传给 XTTS 服务，换回 speaker embedding/配置。
         files = {"wav_file": ("reference.wav", open(ref_audio, "rb"))}
         response = requests.post(f"{server_url}/clone_speaker", files=files)
         return response.json()

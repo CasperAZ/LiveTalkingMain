@@ -41,7 +41,7 @@ class QwenTTS(BaseTTS):
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
 
-        # 音色名, 复用 REF_FILE 参数
+        # 这里复用通用配置字段 REF_FILE 作为 Qwen TTS 的 voice 名称。
         self.voice = opt.REF_FILE if opt.REF_FILE else 'Cherry'
         # 模型名
         self.model = getattr(opt, 'qwen_tts_model', 'qwen3-tts-flash-realtime')
@@ -57,6 +57,10 @@ class QwenTTS(BaseTTS):
             logger.warning("QwenTTS: DASHSCOPE_API_KEY 未设置，请设置环境变量或通过参数传入")
 
         # ---------- 内部状态 ----------
+        # _remainder:
+        #   上一次收到的音频里不足 20ms 的尾巴，下一次拼上继续发。
+        # _response_event:
+        #   用来等待本次 commit 模式合成结束。
         self._remainder = np.array([], dtype=np.float32)  # 上次重采样后不足一 chunk 的 16kHz 样本
         self._response_event = threading.Event()
         self._first_chunk = True          # 当前合成的一句话里的第一个音频包
@@ -100,6 +104,8 @@ class QwenTTS(BaseTTS):
                     logger.exception(f"QwenTTS 回调处理异常: {e}")
 
         # ---------- 建立唯一连接 ----------
+        # QwenTTS 采用“长连接 + 多次 append_text/commit”的模式，
+        # 不需要每次说一句都重新建 WebSocket。
         self._callback = _Callback()
         self._tts_client = QwenTtsRealtime(
             model=self.model,
@@ -123,7 +129,7 @@ class QwenTTS(BaseTTS):
 
         ref_file = textevent.get('tts', {}).get('ref_file',self.opt.REF_FILE)
 
-        # 重置状态
+        # 每合成一句新文本前，都把上一次的流式状态清干净。
         self._remainder = np.array([], dtype=np.float32)
         self._first_chunk = True
         self._current_text = text
@@ -131,7 +137,7 @@ class QwenTTS(BaseTTS):
         self._response_event.clear()
 
         try:
-            #logger.info(f"QwenTTS 发送文本: {text[:80]}...")
+            # 如果本次 voice 与当前会话 voice 不一致，就重设一次连接参数。
             if ref_file != self.voice:
                 logger.info(f'ref_file:{ref_file},self.voice:{self.voice}')
                 self.voice=ref_file
@@ -146,7 +152,7 @@ class QwenTTS(BaseTTS):
             self._tts_client.append_text(text)
             self._tts_client.commit()
 
-            # 等待 response.done（音频在回调中流式处理）
+            # 主线程只等待“本句结束”；真正的音频数据在回调里边到边处理。
             self._response_event.wait(timeout=60)
 
             t_end = time.perf_counter()
@@ -163,7 +169,7 @@ class QwenTTS(BaseTTS):
             self._remainder = np.array([], dtype=np.float32)
             return
 
-        # 整段 24kHz PCM -> float32 -> 一次性 resample 到 16kHz
+        # DashScope 返回的是 PCM 24kHz，需要标准化成项目统一的 16kHz。
         samples_16k = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
         #samples_16k = resampy.resample(x=samples_24k, sr_orig=SRC_SR, sr_new=DST_SR)
 
@@ -171,7 +177,7 @@ class QwenTTS(BaseTTS):
         if self._remainder.shape[0] > 0:
             samples_16k = np.concatenate([self._remainder, samples_16k])
 
-        # 按 self.chunk (320 samples = 20ms @16kHz) 分块推送
+        # 按项目统一节拍 20ms 一块往下游推。
         idx = 0
         total = samples_16k.shape[0]
         while total - idx >= self.chunk and self.state == State.RUNNING:

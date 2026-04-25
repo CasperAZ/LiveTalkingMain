@@ -9,7 +9,7 @@ import numpy as np
 from avatars.audio_features.base_asr import BaseASR
 from avatars.ultralight.audio2feature import Audio2Feature
 
-# hubert audio feature
+# HuBERT 特征提取器，主要给 UltraLight 等模型使用。
 class HubertASR(BaseASR):
     #audio_feat_length: select audio feature before and after
     def __init__(self, opt, parent, audio_processor:Audio2Feature, audio_feat_length=[8,8]):
@@ -35,8 +35,10 @@ class HubertASR(BaseASR):
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return
         
+        # 静音时给一批零特征，保证下游不会因为等不到特征而停住。
         mel_chunks = self.batch_size*[np.zeros((10,1024),dtype=np.float32)]  # default empty feature for silence
         if not is_all_silence or not self.last_is_silence: 
+            # 只要当前或上一拍不是纯静音，就真实提一次特征，避免语音边缘掉口型。
             inputs = np.concatenate(self.frames)  # [N * chunk]
 
             mel = self.audio_processor.get_hubert_from_16k_speech(inputs)

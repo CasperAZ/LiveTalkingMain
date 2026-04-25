@@ -50,6 +50,7 @@ device = initialize_device()
 logger.info('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
+    # 根据设备环境决定是否需要 map_location。
     if device == 'cuda':
         checkpoint = torch.load(checkpoint_path)
     else:
@@ -58,6 +59,7 @@ def _load(checkpoint_path):
     return checkpoint
 
 def load_model(path):
+    # 这里只负责加载 Wav2Lip 网络权重。
     model = Wav2Lip()
     logger.info("Load checkpoint from: {}".format(path))
     checkpoint = _load(path)
@@ -71,6 +73,7 @@ def load_model(path):
     return model.eval()
 
 def load_avatar(avatar_id):
+    # Wav2Lip 的 avatar 素材由完整底图、人脸裁剪图、回贴坐标组成。
     avatar_path = f"./data/avatars/{avatar_id}"
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
@@ -90,7 +93,7 @@ def load_avatar(avatar_id):
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
-    # 预热函数
+    # 用一批假数据跑一遍前向，减少第一次真实推理时的冷启动卡顿。
     logger.info('warmup model...')
     img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
     mel_batch = torch.ones(batch_size, 1, 80, 16).to(device)
@@ -115,8 +118,7 @@ class LipReal(BaseAvatar):
         self.asr.warm_up()
     
     def inference_batch(self, index, audiofeat_batch):
-        # 这里的 index 是针对当前 avatar 的索引
-        # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
+        # 为当前批次取出对应的人脸帧和 Mel 特征，送进 Wav2Lip 网络。
         length = len(self.face_list_cycle)
         img_batch = []
         for i in range(self.batch_size):
@@ -140,6 +142,7 @@ class LipReal(BaseAvatar):
         return pred
 
     def paste_back_frame(self,pred_frame,idx:int):
+        # 预测结果只是一块嘴部区域，需要按 bbox 尺寸缩放后贴回原始底图。
         bbox = self.coord_list_cycle[idx]
         combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
         y1, y2, x1, x2 = bbox

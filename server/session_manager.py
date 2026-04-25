@@ -33,6 +33,8 @@ class SessionManager:
 
     def init_builder(self, build_session_fn):
         """配置用于构建 avatar_session 的工厂函数"""
+        # SessionManager 只负责“管理”，不负责“知道怎么造”。
+        # 真正造会话的逻辑从外部注入，方便解耦。
         self.build_session_fn = build_session_fn
         
     def get_session(self, sessionid: str) -> Optional[BaseAvatar]:
@@ -55,10 +57,11 @@ class SessionManager:
             sessionid = _rand_session_id()
             
         logger.info('Creating sessionid=%s, current session num=%d', sessionid, len(self.sessions))
-        # 预先占位防止重复
+        # 先占位，避免并发情况下重复创建同一个 session。
         self.sessions[sessionid] = None
 
-        # 在线程池中构建 session（加载模型非常耗时）
+        # 构建会话可能会做很多重活，比如加载素材、初始化 TTS/ASR 等，
+        # 所以丢到线程池里执行，避免阻塞 aiohttp 的事件循环。
         avatar_session = await asyncio.get_event_loop().run_in_executor(
             None, self.build_session_fn, sessionid, params
         )
@@ -73,7 +76,11 @@ class SessionManager:
         """销毁会话资源"""
         if sessionid in self.sessions:
             logger.info(f"Removing session {sessionid}")
-            # todo: 还可以主动调 avatar_session 释放
+            # 当前版本先把引用从管理表中移除。
+            # 如果后续你想做更完整的资源回收，可以在这里继续补：
+            # - 停线程
+            # - 关输出
+            # - 清临时文件
             self.sessions.pop(sessionid, None)
 
 # 单例抛出

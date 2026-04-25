@@ -52,12 +52,13 @@ class RTCManager:
 
         #sessionid = _rand_session_id()
 
-        # 通过 SessionManager 构建
+        # WebRTC 连接建立时，同时创建一个新的数字人会话。
+        # 可以把一个 session 理解成“一路独立的数字人服务实例”。
         sessionid = await session_manager.create_session(params)
         logger.info('offer sessionid=%s', sessionid)
         avatar_session = session_manager.get_session(sessionid)
 
-        # 创建 PeerConnection
+        # 创建 PeerConnection，后续浏览器就是通过它接收音视频。
         ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=[ice_server])
@@ -68,17 +69,20 @@ class RTCManager:
         async def on_connectionstatechange():
             logger.info("Connection state is %s", pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
+                # 浏览器断开后，把会话一并清理掉，避免后台线程空跑。
                 await pc.close()
                 self.pcs.discard(pc)
                 session_manager.remove_session(sessionid)
 
-        # 添加发送轨道
+        # 添加发送轨道。
+        # 注意：这里不是接摄像头，而是接数字人渲染器 HumanPlayer。
         from server.webrtc import HumanPlayer
         player = HumanPlayer(avatar_session)
         pc.addTrack(player.audio)
         pc.addTrack(player.video)
 
-        # 设置编解码器偏好
+        # 设置视频编解码器优先级。
+        # H264 一般兼容性最好，VP8 作为兜底。
         capabilities = RTCRtpSender.getCapabilities("video")
         preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
         preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
@@ -103,6 +107,7 @@ class RTCManager:
     async def handle_rtcpush(self, push_url, sessionid: str):
         """RTCPush 模式：主动推流"""
         import aiohttp
+        # 这里与 handle_offer 相反，不是等待浏览器来连，而是我们主动把流推给远端。
         await session_manager.create_session({}, sessionid)
         avatar_session = session_manager.get_session(sessionid)
 
@@ -133,6 +138,7 @@ class RTCManager:
 
     async def shutdown(self):
         """关闭所有 PeerConnection"""
+        # 服务退出时统一关闭全部 RTC 连接。
         coros = [pc.close() for pc in self.pcs]
         await asyncio.gather(*coros)
         self.pcs.clear()

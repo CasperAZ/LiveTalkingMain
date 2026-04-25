@@ -1,6 +1,8 @@
 import logging
  
 # 配置日志器
+# 当前默认把日志写入 `livetalking.log`。
+# 如果你在本地排障时更想直接看控制台，可以启用下面注释掉的 StreamHandler。
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')

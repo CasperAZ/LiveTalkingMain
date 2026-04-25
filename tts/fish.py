@@ -8,6 +8,7 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# FishTTS 也是“请求外部流式服务 -> 重采样 -> 切块推送”的模式。
 @register("tts", "fishtts")
 class FishTTS(BaseTTS):
     def txt_to_audio(self,msg:tuple[str, dict]): 

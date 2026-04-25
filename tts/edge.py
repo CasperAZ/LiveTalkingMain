@@ -14,6 +14,7 @@ from registry import register
 class EdgeTTS(BaseTTS):
     def txt_to_audio(self,msg:tuple[str, dict]):
         text,textevent = msg
+        # EdgeTTS 里 REF_FILE 被当成 voice 名称使用。
         voicename = textevent.get('tts', {}).get('ref_file',self.opt.REF_FILE) #self.opt.REF_FILE #"zh-CN-YunxiaNeural"
         t = time.time()
         asyncio.new_event_loop().run_until_complete(self.__main(voicename,text))
@@ -26,6 +27,7 @@ class EdgeTTS(BaseTTS):
         stream = self.__create_bytes_stream(self.input_stream)
         streamlen = stream.shape[0]
         idx=0
+        # 合成完的一整段音频再次切成 20ms 小块，统一喂给下游。
         while streamlen >= self.chunk and self.state==State.RUNNING:
             eventpoint={}
             streamlen -= self.chunk
@@ -67,7 +69,7 @@ class EdgeTTS(BaseTTS):
                 if first:
                     first = False
                 if chunk["type"] == "audio" and self.state==State.RUNNING:
-                    #self.push_audio(chunk["data"])
+                    # EdgeTTS 是流式返回字节，这里先写到内存流，再统一解码/重采样。
                     self.input_stream.write(chunk["data"])
                     #file.write(chunk["data"])
                 elif chunk["type"] == "WordBoundary":

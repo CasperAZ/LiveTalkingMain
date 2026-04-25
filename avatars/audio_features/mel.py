@@ -32,8 +32,7 @@ from avatars.wav2lip import audio
 class MelASR(BaseASR):
 
     def run_step(self):
-        ############################################## extract audio feature ##############################################
-        # get a frame of audio
+        # Wav2Lip 需要 Mel 频谱特征。
         for _ in range(self.batch_size*2):
             audioframe = self.get_audio_frame()
             self.frames.append(audioframe.data)
@@ -49,6 +48,7 @@ class MelASR(BaseASR):
         # cut off stride
         left = max(0, self.stride_left_size*80/50)
         right = min(len(mel[0]), len(mel[0]) - self.stride_right_size*80/50)
+        # Mel 特征步长与视频帧率不同，这里做一个时间轴映射。
         mel_idx_multiplier = 80./self.fps # 80 is the hop length of mel spectrogram, so that each 40ms corresponds to 3.2 mel frames. (80/25=3.2)
         mel_step_size = 16
         i = 0
@@ -63,5 +63,5 @@ class MelASR(BaseASR):
             i += 1
         self.feat_queue.put(mel_chunks)
         
-        # discard the old part to save memory
+        # 只保留上下文需要的尾部，避免缓存越积越大。
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

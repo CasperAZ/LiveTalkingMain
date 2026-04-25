@@ -1,6 +1,12 @@
+// 这个文件是最基础的 WebRTC 前端客户端逻辑。
+// 主要做三件事：
+// 1. 创建 RTCPeerConnection；
+// 2. 向后端 `/offer` 发送 SDP offer；
+// 3. 收到音视频轨后挂到页面元素上播放。
 var pc = null;
 
 function negotiate() {
+    // 这里只接收音视频，不向后端发送本地麦克风/摄像头轨道。
     pc.addTransceiver('video', { direction: 'recvonly' });
     pc.addTransceiver('audio', { direction: 'recvonly' });
     return pc.createOffer().then((offer) => {
@@ -53,7 +59,7 @@ function start() {
 
     pc = new RTCPeerConnection(config);
 
-    // connect audio / video
+    // 后端一旦把数字人音视频轨发回来，就挂到页面上的 <audio>/<video> 标签。
     pc.addEventListener('track', (evt) => {
         if (evt.track.kind == 'video') {
             document.getElementById('video').srcObject = evt.streams[0];
@@ -70,14 +76,14 @@ function start() {
 function stop() {
     document.getElementById('stop').style.display = 'none';
 
-    // close peer connection
+    // 稍微延时再关，给最后一点信令/媒体收尾留时间。
     setTimeout(() => {
         pc.close();
     }, 500);
 }
 
 window.onunload = function(event) {
-    // 在这里执行你想要的操作
+    // 页面关闭时顺手把 PeerConnection 关掉，避免浏览器残留连接。
     setTimeout(() => {
         pc.close();
     }, 500);
@@ -88,7 +94,7 @@ window.onbeforeunload = function (e) {
                 pc.close();
             }, 500);
         e = e || window.event
-        // 兼容IE8和Firefox 4之前的版本
+        // 兼容旧浏览器的关闭提示写法。
         if (e) {
           e.returnValue = '关闭提示'
         }

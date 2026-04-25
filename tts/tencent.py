@@ -18,6 +18,8 @@ _HOST = "tts.cloud.tencent.com"
 _PATH = "/stream"
 _ACTION = "TextToStreamAudio"
 
+# TencentTTS 通过腾讯云流式接口返回 PCM 数据。
+# 这里除了音频处理，还包含签名生成逻辑。
 @register("tts", "tencent")
 class TencentTTS(BaseTTS):
     def __init__(self, opt, parent):

@@ -57,11 +57,14 @@ device = initialize_device()
 logger.info('Using {} for inference.'.format(device))
 
 def load_model(opt):
+    # UltraLight 这里先准备音频特征处理器；
+    # 具体的口型模型权重在 load_avatar() 里按 avatar 加载。
     audio_processor = Audio2Feature()
     model = None
     return audio_processor,model
 
 def load_avatar(avatar_id):
+    # UltraLight 的每个 avatar 目录里带着自己的 ultralight.pth。
     avatar_path = f"./data/avatars/{avatar_id}"
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
@@ -84,6 +87,7 @@ def load_avatar(avatar_id):
 
 @torch.no_grad()
 def warm_up(batch_size,avatar,modelres):
+    # 用假图像和假音频特征预热模型。
     logger.info('warmup model...')
     model,_,_,_ = avatar
     img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
@@ -142,8 +146,7 @@ class LightReal(BaseAvatar):
         self.asr.warm_up()
 
     def inference_batch(self, index, audiofeat_batch):
-        # 这里的 index 是针对当前 avatar 的索引
-        # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
+        # UltraLight 会把人脸裁剪图和 HuBERT 特征一起送入网络预测嘴部区域。
         length = len(self.face_list_cycle)
         img_batch = []
 
@@ -172,6 +175,7 @@ class LightReal(BaseAvatar):
         return pred
     
     def paste_back_frame(self,pred_frame,idx:int):
+        # 先写回裁剪图，再把裁剪图贴回完整底图。
         bbox = self.coord_list_cycle[idx]
         combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
         x1, y1, x2, y2 = bbox

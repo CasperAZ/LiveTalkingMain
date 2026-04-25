@@ -12,11 +12,13 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# DoubaoTTS 走火山引擎的 WebSocket 二进制协议。
+# 这类实现对接平台时很常见：本地只保留统一接口，具体协议细节封装在 provider 内部。
 @register("tts", "doubao")
 class DoubaoTTS(BaseTTS):
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
-        # 从配置中读取火山引擎参数
+        # 从环境变量中读取火山引擎鉴权参数。
         self.appid = os.getenv("DOUBAO_APPID")
         self.token = os.getenv("DOUBAO_TOKEN")
         _cluster = 'volcano_tts'

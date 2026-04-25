@@ -8,6 +8,8 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# CosyVoice 通过外部 HTTP 服务提供零样本克隆能力。
+# 当前实现是“请求远端流式音频 -> 每段重采样到 16k -> 切成 20ms 音频块”。
 @register("tts", "cosyvoice")
 class CosyVoiceTTS(BaseTTS):
     def txt_to_audio(self,msg:tuple[str, dict]):

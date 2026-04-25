@@ -56,7 +56,7 @@ class WhisperASR(BaseASR):
         return feature_chunks
 
     def run_step(self):
-        ############################################## extract audio feature ##############################################
+        # MuseTalk 需要 Whisper 风格语音特征。
         start_time = time.time()
         for _ in range(self.batch_size*2):
             audio_frame = self.get_audio_frame()
@@ -72,5 +72,5 @@ class WhisperASR(BaseASR):
                                               audio_feat_win = [0,5],start=self.stride_left_size/2,
                                               feature_idx_multiplier=2)
         self.feat_queue.put(whisper_chunks)
-        # discard the old part to save memory
+        # 只保留下一轮还需要的上下文尾部。
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

@@ -56,7 +56,7 @@ device = initialize_device()
 logger.info('Using {} for inference.'.format(device))
 
 def load_model():
-    # load model weights
+    # MuseTalk 依赖 VAE、UNet、位置编码器和 Whisper 特征提取器等多个组件。
     vae, unet, pe = load_all_model()
     #device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()) else "cpu"))
     timesteps = torch.tensor([0], device=device)
@@ -68,6 +68,7 @@ def load_model():
     return vae, unet, pe, timesteps, audio_processor
 
 def load_avatar(avatar_id):
+    # MuseTalk 的 avatar 素材除了底图外，还包含 mask、latent 等中间结果。
     avatar_path = f"./data/avatars/{avatar_id}"
     full_imgs_path = f"{avatar_path}/full_imgs" 
     coords_path = f"{avatar_path}/coords.pkl"
@@ -93,7 +94,7 @@ def load_avatar(avatar_id):
 
 @torch.no_grad()
 def warm_up(batch_size,model):
-    # 预热函数
+    # 通过假特征提前跑热推理图，减少首次开口延迟。
     print('warmup model...')
     vae, unet, pe, timesteps, audio_processor = model
     whisper_batch = np.ones((batch_size, 50, 384), dtype=np.uint8)
@@ -129,8 +130,7 @@ class MuseReal(BaseAvatar):
     
 
     def inference_batch(self, index, audiofeat_batch):
-        # 这里的 index 是针对当前 avatar 的索引
-        # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
+        # MuseTalk 先在 latent 空间里推理，再通过 VAE 解码回图像。
         length = len(self.input_latent_list_cycle)
         whisper_batch = np.stack(audiofeat_batch)
         latent_batch = []
@@ -153,6 +153,7 @@ class MuseReal(BaseAvatar):
         return pred
 
     def paste_back_frame(self,pred_frame,idx:int):
+        # MuseTalk 回贴时会结合 mask 做融合，边缘通常更自然。
         bbox = self.coord_list_cycle[idx]
         ori_frame = copy.deepcopy(self.frame_list_cycle[idx])
         x1, y1, x2, y2 = bbox

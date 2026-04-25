@@ -6,12 +6,15 @@ from utils.logger import logger
 from .base_tts import BaseTTS, State
 from registry import register
 
+# AzureTTS 走 Azure Speech SDK 的实时回调模式：
+# 文本提交后，SDK 会不断回调 `_on_synthesizing()`，每次给一小段 PCM。
 @register("tts", "azuretts")
 class AzureTTS(BaseTTS):
     CHUNK_SIZE = 640  # 16kHz, 20ms, 16-bit Mono PCM size
     def __init__(self, opt, parent):
         super().__init__(opt,parent)
         self.audio_buffer = b''
+        # 这里默认把 REF_FILE 当成 Azure 的 voice 名称使用。
         voicename = self.opt.REF_FILE   # 比如"zh-CN-XiaoxiaoMultilingualNeural"
         speech_key = os.getenv("AZURE_SPEECH_KEY")
         tts_region = os.getenv("AZURE_TTS_REGION")
@@ -26,6 +29,7 @@ class AzureTTS(BaseTTS):
         
     def txt_to_audio(self,msg:tuple[str, dict]):
         msg_text, textevent = msg
+        # 当前实现支持每次请求动态覆盖 voice。
         ref_file = textevent.get('tts', {}).get('ref_file',self.opt.REF_FILE)
         self.speech_config.speech_synthesis_voice_name = ref_file
         # 实时根据新的发言人配置生成新的 synthesizer 可能会很慢，但为保持代码兼容这里不做大幅度调整
@@ -57,7 +61,7 @@ class AzureTTS(BaseTTS):
             self.audio_buffer = b''
             return
 
-        # evt.result.audio_data 是刚到的一小段原始 PCM
+        # evt.result.audio_data 是刚到的一小段原始 PCM。
         self.audio_buffer += evt.result.audio_data
         while len(self.audio_buffer) >= self.CHUNK_SIZE:
             chunk = self.audio_buffer[:self.CHUNK_SIZE]

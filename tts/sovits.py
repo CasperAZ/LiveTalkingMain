@@ -14,6 +14,7 @@ from registry import register
 class SovitsTTS(BaseTTS):
     def txt_to_audio(self,msg:tuple[str, dict]): 
         text,textevent = msg
+        # GPT-SoVITS 一般依赖参考音频 + 参考文本做语音克隆。
         ref_file = textevent.get('tts', {}).get('ref_file',self.opt.REF_FILE)
         ref_text = textevent.get('tts', {}).get('ref_text',self.opt.REF_TEXT)
         self.stream_tts(
@@ -45,6 +46,7 @@ class SovitsTTS(BaseTTS):
         # #req["stream_chunk_size"] = stream_chunk_size  # you can reduce it to get faster response, but degrade quality
         # req["streaming_mode"] = True
         try:
+            # 这里请求外部 GPT-SoVITS 服务的流式接口。
             res = requests.post(
                 f"{server_url}/tts",
                 json=req,
@@ -92,8 +94,7 @@ class SovitsTTS(BaseTTS):
         first = True
         for chunk in audio_stream:
             if chunk is not None and len(chunk)>0:          
-                #stream = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32767
-                #stream = resampy.resample(x=stream, sr_orig=32000, sr_new=self.sample_rate)
+                # 每个 chunk 都是一小段音频文件片段，需要先解码成波形。
                 byte_stream=BytesIO(chunk)
                 stream = self.__create_bytes_stream(byte_stream)
                 streamlen = stream.shape[0]
@@ -107,6 +108,7 @@ class SovitsTTS(BaseTTS):
                     self.parent.put_audio_frame(stream[idx:idx+self.chunk],eventpoint)
                     streamlen -= self.chunk
                     idx += self.chunk
+        # 最后补一个 end 事件，方便前端或业务层知道本句播报完成。
         eventpoint={'status':'end','text':text}
         eventpoint.update(**textevent) 
         self.parent.put_audio_frame(np.zeros(self.chunk,np.float32),eventpoint)

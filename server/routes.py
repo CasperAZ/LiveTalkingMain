@@ -35,6 +35,8 @@ from server.session_manager import session_manager
 
 def get_session(request, sessionid: str):
     """从 app 中获取 session 实例"""
+    # 这里单独包一层，是为了以后你如果想切换成
+    # “按平台/业务线路由到不同 session 仓库”，改动面更小。
     return session_manager.get_session(sessionid)
 
 
@@ -51,15 +53,19 @@ async def human(request):
             return json_error("session not found")
 
         if params.get('interrupt'):
+            # 新消息到来时先打断旧播报，适合直播互动场景。
             avatar_session.flush_talk()
 
         datainfo = {}
         if params.get('tts'):  # tts 参数透传（voice, emotion 等）
+            # tts 子参数不会在这里解析，而是一路透传给具体 TTS 插件。
             datainfo['tts'] = params.get('tts')
 
         if params['type'] == 'echo':
+            # echo 模式：直接朗读用户输入，不调用大模型。
             avatar_session.put_msg_txt(params['text'], datainfo)
         elif params['type'] == 'chat':
+            # chat 模式：把输入交给大模型，后续边生成边播报。
             llm_response = request.app.get("llm_response")
             if llm_response:
                 asyncio.get_event_loop().run_in_executor(
@@ -100,6 +106,7 @@ async def humanaudio(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
+        # 上传的是整段音频文件，后续会被切成 20ms 一块的 PCM 数据进入驱动链路。
         avatar_session.put_audio_file(filebytes, datainfo)
         return json_ok()
     except Exception as e:
@@ -115,6 +122,11 @@ async def set_audiotype(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
+        # audiotype 是动作编排状态号。
+        # 比如你未来可以定义：
+        # 1 = 静默待机
+        # 2 = 欢迎新观众
+        # 3 = 礼物反馈动作
         avatar_session.set_custom_state(params['audiotype'])
         return json_ok()
     except Exception as e:
@@ -154,6 +166,8 @@ async def is_speaking(request):
 
 def setup_routes(app):
     """注册所有路由到 aiohttp app"""
+    # 这里就是项目当前所有对外业务入口的总表。
+    # 快手适配时很可能会新增一层“平台 webhook -> 内部统一接口”的转换。
     app.router.add_post("/human", human)
     app.router.add_post("/humanaudio", humanaudio)
     app.router.add_post("/set_audiotype", set_audiotype)

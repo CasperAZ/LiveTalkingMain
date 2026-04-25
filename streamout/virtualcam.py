@@ -27,6 +27,7 @@ class VirtualCamOutput(BaseOutput):
         self._quit_event = None
 
     def _play_audio_loop(self):
+        # pyvirtualcam 只负责视频，音频需要单独用 PyAudio 在本机播放。
         import pyaudio
         p = pyaudio.PyAudio()
         stream = p.open(
@@ -47,6 +48,7 @@ class VirtualCamOutput(BaseOutput):
         stream.close()
 
     def start(self) -> None:
+        # 和 RTMP 一样，摄像头对象延迟到第一帧视频到来时再初始化。
         """启动虚拟摄像头音频线程，视频流延迟到第一帧接收时初始化"""
         try:
             import pyvirtualcam
@@ -80,6 +82,7 @@ class VirtualCamOutput(BaseOutput):
 
     def push_audio_frame(self, frame, eventpoint=None) -> None:
         if self._audio_queue:
+            # 这里直接把 PCM 字节交给本地音频播放线程。
             self._audio_queue.put(frame.tobytes())
             self.parent.notify(eventpoint)
 

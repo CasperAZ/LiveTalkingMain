@@ -35,6 +35,11 @@ VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 SAMPLE_RATE = 16000
 AUDIO_TIME_BASE = fractions.Fraction(1, SAMPLE_RATE)
 
+# 这些常量决定 WebRTC 时间轴的推进方式：
+# - AUDIO_PTIME=20ms：每次送一个 20ms 音频包
+# - VIDEO_PTIME=40ms：对应 25fps 的视频输出
+# - *_TIME_BASE：告诉播放器“pts 的单位是什么”
+
 #from aiortc.contrib.media import MediaPlayer, MediaRelay
 #from aiortc.rtcrtpsender import RTCRtpSender
 from aiortc import (
@@ -45,7 +50,9 @@ logging.basicConfig()
 logger = logging.getLogger(__name__)
 from utils.logger import logger as mylogger
 
-
+# 这个模块的作用是把“数字人内部生产出的音视频帧”包装成 aiortc 能识别的媒体轨。
+# 你可以把它理解成：
+# 上游是项目自己的渲染队列，下游是 WebRTC 浏览器播放器，中间靠这里做桥接。
 class PlayerStreamTrack(MediaStreamTrack):
     """
     A video track that returns an animated flag.
@@ -72,7 +79,7 @@ class PlayerStreamTrack(MediaStreamTrack):
 
         if self.kind == 'video':
             if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * VIDEO_CLOCK_RATE
+                # 用固定步长递增时间戳，比直接取当前 wall clock 更稳定。
                 self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
                 self.current_frame_count += 1
                 wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
@@ -90,7 +97,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             return self._timestamp, VIDEO_TIME_BASE
         else: #audio
             if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * SAMPLE_RATE
+                # 音频同理，按固定 20ms 的节奏推进采样时间轴。
                 self._timestamp += int(AUDIO_PTIME * SAMPLE_RATE)
                 self.current_frame_count += 1
                 wait = self._start + self.current_frame_count * AUDIO_PTIME - time.time()
@@ -109,7 +116,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             return self._timestamp, AUDIO_TIME_BASE
 
     async def recv(self) -> Union[Frame, Packet]:
-        # frame = self.frames[self.counter % 30]            
+        # aiortc 需要一帧媒体数据时会调用这里。
         self._player._start(self)
         # if self.kind == 'video':
         #     frame = await self._queue.get()
@@ -131,12 +138,14 @@ class PlayerStreamTrack(MediaStreamTrack):
                 frame, eventpoint = self._queue.get_nowait()
                 break
             except queue.Empty:
+                # 队列暂时没数据时短暂休眠，避免 CPU 空转。
                 await asyncio.sleep(0.005)
                 
         pts, time_base = await self.next_timestamp()
         frame.pts = pts
         frame.time_base = time_base
         if eventpoint and self._player is not None:
+            # 音频事件（开始/结束/文本等）随帧同步回上层。
             self._player.notify(eventpoint)
         if frame is None:
             self.stop()
@@ -185,6 +194,7 @@ class HumanPlayer:
 
         self.__container = avatar_session
         if hasattr(self.__container, 'output'):
+            # 让 output 层反向持有 player，这样 output.push_* 可以直接喂给 WebRTC。
             self.__container.output._player = self
 
     def push_video(self, frame):
@@ -224,6 +234,7 @@ class HumanPlayer:
         self.__started.add(track)
         if self.__thread is None:
             self.__log_debug("Starting worker thread")
+            # 第一次真正开始消费媒体轨时，才启动底层渲染线程，属于懒启动。
             self.__thread_quit = threading.Event()
             self.__thread = threading.Thread(
                 name="media-player",

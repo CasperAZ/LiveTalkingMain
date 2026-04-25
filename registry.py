@@ -1,5 +1,13 @@
 ###############################################################################
-#  插件注册表 — 通过装饰器注册，按名称创建实例
+#  插件注册表
+#
+#  这是项目实现“可插拔架构”的关键文件。
+#  可以把它理解成一个简化版插件工厂：
+#  - `@register(...)` 负责登记“名字 -> 类”
+#  - `create(...)` 负责按名字创建实例
+#
+#  这也是你后续扩展平台能力时最值得保留的设计之一：
+#  新增一个 TTS、一个输出器、甚至一个新数字人模型，不需要大改主流程。
 ###############################################################################
 
 from typing import Dict, Type, Any
@@ -24,6 +32,8 @@ def register(category: str, name: str):
         class EdgeTTS(BaseTTS): ...
     """
     def decorator(cls):
+        # category 例如 tts / avatar / output。
+        # name 是配置里真正填写的插件名。
         if category not in _REGISTRY:
             _REGISTRY[category] = {}
         _REGISTRY[category][name] = cls
@@ -40,6 +50,9 @@ def create(category: str, name: str, **kwargs) -> Any:
 
         tts = registry.create("tts", "edgetts", opt=opt)
     """
+    # 如果这里报“Plugin not found”，常见原因有两个：
+    # 1. 对应模块还没 import，装饰器还没执行；
+    # 2. 配置名和 @register 里的名字不一致。
     if category not in _REGISTRY or name not in _REGISTRY[category]:
         available = list(_REGISTRY.get(category, {}).keys())
         raise ValueError(
