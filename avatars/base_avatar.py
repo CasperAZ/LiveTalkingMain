@@ -76,12 +76,33 @@ class AudioFrameData:
     userdata: dict = field(default_factory=dict)
 
 class BaseAvatar:
+    """
+    数字人会话核心基类（会话级总控）。
+
+    这一层不直接绑定某一个具体模型，而是定义“统一流水线协议”：
+    1) 输入层：文本输入 / 音频输入（TTS、上传文件、自定义动作音频）。
+    2) 特征层：ASR/特征提取（mel、whisper、hubert 等）。
+    3) 推理层：子类实现 inference_batch() 产出口型区域结果。
+    4) 画面层：子类实现 paste_back_frame() 回贴到原始底图。
+    5) 输出层：统一推给 streamout（WebRTC/RTMP/虚拟摄像头）。
+
+    线程模型（关键）：
+    - 线程A: TTS（把文本变成音频块）
+    - 线程B: inference（吃特征 -> 产出预测帧）
+    - 线程C: process_frames（后处理画面 + 音频/视频统一输出）
+    """
     def __init__(self, opt):
         self.opt = opt
+        # 音频采样率，单位 Hz。16000 表示每秒 16000 个采样点。
         self.sample_rate = 16000
-        # 项目统一把音频切成 20ms 一小块。
-        # 对 16k 采样率来说，20ms = 320 个采样点。
-        self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms)
+        # 音频分块长度（采样点数）：
+        # chunk = sample_rate // (fps * 2)
+        #
+        # 设计动机：
+        # - 默认 25fps 时，一个视频帧周期是 40ms；
+        # - 系统按“1个视频帧对应2个音频块”推进；
+        # - 所以每个音频块约 20ms -> 16k * 0.02 = 320 点。
+        self.chunk = self.sample_rate // (opt.fps*2)
         self.sessionid = self.opt.sessionid
 
         self.speaking = False
@@ -102,7 +123,8 @@ class BaseAvatar:
         # self.custom_opt = {}
         self.__loadcustom()
 
-        # 这个队列是“模型推理线程”和“后处理/输出线程”之间的交接点。
+        # 推理结果队列：线程B(inference) -> 线程C(process_frames) 的桥梁。
+        # 队列元素结构：(pred_frame_or_none, [audio_frame_1, audio_frame_2], frame_idx)
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
@@ -158,7 +180,8 @@ class BaseAvatar:
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
     def put_audio_file(self, filebyte, datainfo:dict={}): 
-        # 上传整段音频文件时，需要先解码，再切成固定大小的小块进入驱动链路。
+        # 上传整段音频文件时，流程是：
+        # 文件字节 -> 解码成波形 -> 重采样/归一化 -> 按 chunk 切块 -> 逐块入队。
         input_stream = BytesIO(filebyte)
         stream = self.__create_bytes_stream(input_stream)
         streamlen = stream.shape[0]
@@ -233,7 +256,13 @@ class BaseAvatar:
     def __loadcustom(self):
         if not hasattr(self.opt, 'customopt') or not self.opt.customopt:
             return
-        # customopt 描述“静默时播什么动画/音频”。
+        # customopt 描述“静默或特定状态下播放什么动画/音频”。
+        # 典型结构（每项）：
+        # {
+        #   "audiotype": 2,
+        #   "imgpath": "xxx/frames",
+        #   "audiopath": "xxx/audio.wav"
+        # }
         for item in self.opt.customopt:
             logger.info(item)
             input_img_list = glob.glob(os.path.join(item['imgpath'], '*.[jpJP][pnPN]*[gG]'))
@@ -317,7 +346,7 @@ class BaseAvatar:
     #         return size - res - 1 
     
     def get_custom_audio_stream(self, audiotype):
-        # 每次只取出一个 chunk 长度的音频，保持与主驱动节拍一致。
+        # 每次只取出一个 chunk 长度的音频，保证自定义动作也遵守同一节拍。
         idx = self.custom_audio_index[audiotype]
         stream = self.custom_audio_cycle[audiotype][idx:idx+self.chunk]
         self.custom_audio_index[audiotype] += self.chunk
@@ -361,8 +390,13 @@ class BaseAvatar:
             except queue.Empty:
                 continue
                 
+            # 这一批次是否全静音：用于决定是否跳过模型推理（提升吞吐）。
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
+            # 关键对齐策略：
+            # - 每个视频帧对应 2 个音频块
+            # - 当前 batch 推理 batch_size 个视频帧
+            # - 因此需要准备 batch_size * 2 个音频块
             for _ in range(self.batch_size * 2):
                 audioframe:AudioFrameData = self.asr.output_queue.get()
                 if audioframe.type == 0:
@@ -376,6 +410,7 @@ class BaseAvatar:
                 # 没有说话时不跑模型，直接走静默帧/原始帧逻辑。
                 for i in range(self.batch_size):
                     idx = mirror_index(length, index)
+                    # i*2:i*2+2：把两块音频打包给当前这个视频帧
                     self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
                     index = index + 1
             else:
@@ -393,6 +428,7 @@ class BaseAvatar:
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
+                    # 推理结果帧 + 对应两块音频，一起入队给后处理线程
                     self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], mirror_index(length, index)))
                     index = index + 1
                     
@@ -428,6 +464,7 @@ class BaseAvatar:
                 _transition_start = time.time()
             _last_speaking = current_speaking
 
+            # audio_frames 长度固定是 2（和“1视频帧=2音频块”策略一致）。
             if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
                 self.speaking = False
                 audiotype = audio_frames[0].type
@@ -514,6 +551,10 @@ class BaseAvatar:
         while not quit_event.is_set(): 
             t = time.perf_counter()
             # run_step() 每次推进一点音频驱动流程，相当于整个会话的节拍器。
+            # 子类 ASR 会在这里：
+            # 1) 从输入队列取音频块；
+            # 2) 维护上下文窗口；
+            # 3) 产出可供推理线程消费的特征 batch。
             self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0

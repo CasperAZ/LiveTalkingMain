@@ -25,13 +25,23 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="LiveTalking Digital Human Server")
 
-    # ─── 音频相关参数 ──────────────────────────────────────────────────
-    # l / r 表示特征提取时往左/往右看的上下文帧数。
-    # 这些参数会影响口型模型理解“当前音节”时能看到多少前后文。
-    parser.add_argument('--fps', type=int, default=25, help="video fps, must be 25")
-    parser.add_argument('-l', type=int, default=10)
-    parser.add_argument('-m', type=int, default=8)
-    parser.add_argument('-r', type=int, default=10)
+    # ─── 时序/特征窗口参数 ───────────────────────────────────────────────
+    # 这里不只是“音频提取参数”，而是整个实时链路的节拍参数：
+    # 1) fps 决定视频主时钟，也间接决定每个音频块时长。
+    #    在当前实现中：chunk_samples = 16000 / (fps * 2)
+    #    当 fps=25 时，每个音频块是 320 采样点（约 20ms）。
+    # 2) l/r 是 ASR 特征窗口的左右上下文长度（单位：音频帧，约 20ms/帧）。
+    #    可理解为围绕当前时刻的滑动窗口：窗口总长度约为 (l + r) 帧。
+    # 3) m 是历史遗留参数（legacy）。在当前代码里没有被实际消费，
+    #    保留它主要是为了兼容旧脚本/旧命令行，不参与当前推理逻辑。
+    parser.add_argument('--fps', type=int, default=25,
+                        help="video fps (also controls audio chunk size); current pipeline expects 25")
+    parser.add_argument('-l', type=int, default=10,
+                        help="left context size for ASR feature window (in ~20ms audio frames)")
+    parser.add_argument('-m', type=int, default=8,
+                        help="legacy reserved arg; currently unused by runtime")
+    parser.add_argument('-r', type=int, default=10,
+                        help="right context size for ASR feature window (in ~20ms audio frames)")
 
     # ─── 画面 ──────────────────────────────────────────────────────────
     # parser.add_argument('--W', type=int, default=450, help="GUI width")

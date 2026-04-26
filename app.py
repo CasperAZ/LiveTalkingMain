@@ -125,7 +125,10 @@ async def on_shutdown(app):
 
 def main():
     global rtc_manager, opt, model,load_avatar
-    # 解析命令行参数
+    # 运行时解析命令行参数（来自 sys.argv）：
+    # - 如果启动命令里传了参数（例如 --model musetalk），这里会读到传入值；
+    # - 如果没传，则自动回退到 config.py 中定义的 default。
+    # 所以 config.py 不是“写死配置”，而是“参数定义 + 默认值”。
     from config import parse_args
     opt = parse_args()
 

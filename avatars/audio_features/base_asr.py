@@ -27,24 +27,46 @@ from avatars.base_avatar import BaseAvatar,AudioFrameData
 
 
 class BaseASR:
+    """
+    ASR/音频特征层的统一基类（这里的 ASR 更偏“音频驱动与特征切片”，不只是语音识别）。
+
+    你可以把它理解成“音频节拍器 + 特征窗口管理器”：
+    1) 接收上游音频（TTS 合成音频、用户上传音频、自定义动作音频）。
+    2) 按固定节拍切成小块（chunk），维持实时流水线稳定推进。
+    3) 维护左右上下文窗口（l/r），把连续特征切成和视频帧对齐的小片段。
+    4) 把“可用于模型推理”的特征批次放入 feat_queue，交给口型推理线程消费。
+    """
     def __init__(self, opt, parent:BaseAvatar = None):
         self.opt = opt
         self.parent = parent
 
-        self.fps = opt.fps # 20 ms per frame
+        # fps 是全链路节拍参数（视频主时钟），不是“只管视频不管音频”。
+        self.fps = opt.fps
+        # 采样率单位是 Hz（每秒采样点数）。16000 Hz = 每秒 16000 个采样点。
         self.sample_rate = 16000
-        # 与 BaseAvatar 保持一致：每个音频块按 20ms 切分。
-        self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
+        # 关键公式：
+        # chunk_samples = sample_rate // (fps * 2)
+        #
+        # 为什么是 fps * 2：
+        # - 当前默认视频 25fps -> 每帧 40ms
+        # - 工程里让“每个视频帧对应 2 个音频块”
+        # - 所以每个音频块是 20ms
+        # - 20ms * 16000 = 320 采样点
+        self.chunk = self.sample_rate // (opt.fps*2)
+
+        # 输入音频队列：上游喂进来的 AudioFrameData 先放这里。
         self.queue:Queue[AudioFrameData] = Queue()
+        # 输出音频队列：与特征同步后的音频帧，供渲染/输出线程发送。
         self.output_queue:Queue[AudioFrameData] = Queue()
 
         self.batch_size = opt.batch_size
 
+        # 连续音频帧缓存（滑动窗口底座），用于构建特征上下文。
         self.frames: list[NDArray[np.float32]] = []
+        # 左/右上下文长度（单位：音频帧，默认约 20ms 一帧）。
         self.stride_left_size = opt.l
         self.stride_right_size = opt.r
-        #self.context_size = 10
-        # feat_queue 里放的是给口型模型线程消费的特征 batch。
+        # 特征队列：子类 run_step() 提取好的特征批次放进去，推理线程会消费。
         self.feat_queue = Queue(maxsize=2)
 
         #self.warm_up()
@@ -54,6 +76,7 @@ class BaseASR:
         self.queue.queue.clear()
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
+        # type=0 表示正常说话音频。
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
 
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio
@@ -79,7 +102,8 @@ class BaseASR:
         return self.output_queue.get()
     
     def warm_up(self):
-        # 预填充一部分上下文，避免系统刚启动时特征窗口不够。
+        # 预热阶段先填充 (left + right) 个音频块，避免刚启动时窗口不完整。
+        # 然后再弹出 left 个，让“当前时间点”位于窗口中间附近。
         for _ in range(self.stride_left_size + self.stride_right_size):
             audio_frame=self.get_audio_frame()
             self.frames.append(audio_frame.data)
@@ -99,12 +123,19 @@ class BaseASR:
                         audio_feat_win,  
                         feature_idx_multiplier=1.0):
         """
-        Get sliced features based on a given index
-        :param feature_array: 
-        :param vid_idx: 视频帧在一个batch内编号
-        :param audio_feat_win: 音频特征窗口大小，通常为 [左侧窗口大小, 右侧窗口大小]，单位为视频帧数
-        :param feature_idx_multiplier: 用于将视频帧索引转换为特征索引的乘数，通常为 (特征提取的宽度 / 视频帧率)
-        :return: 
+        按“视频帧索引”从长音频特征序列中切一段窗口。
+
+        参数说明：
+        - feature_array: 整段音频的特征序列（例如 mel / whisper 特征）。
+        - vid_idx:       目标视频帧在 batch 内的帧号。
+        - audio_feat_win:窗口大小 [left_win, right_win]，单位是“视频帧数语义”。
+        - feature_idx_multiplier:
+            由于“音频特征步长”和“视频帧步长”通常不同，
+            需要这个倍率把视频索引映射到特征索引。
+
+        返回：
+        - selected_feature: 切出来的特征窗口（numpy array）
+        - selected_idx:     实际使用到的特征索引（便于调试对齐）
         """
         length = feature_array.shape[0] #len(feature_array)
         selected_feature = []
@@ -139,15 +170,18 @@ class BaseASR:
         # selected_feature = selected_feature.reshape(-1, 256)# 20*256
         return np.asarray(selected_feature),selected_idx
 
-    #参数定义 
+    # 参数定义
     def _feature2chunks(self,feature_array,batch_size,audio_feat_win=[8,8],start=0,feature_idx_multiplier=1.0):
         """
-        :param feature_array: 
-        :param batch_size: batch大小
-        :param audio_feat_win: 音频特征窗口大小，通常为 [左侧窗口大小, 右侧窗口大小]，单位为视频帧数
-        :param start: 起始帧索引，通常为 stride_left_size/2
-        :param feature_idx_multiplier: 用于将视频帧索引转换为特征索引的乘数，通常为 (特征提取的宽度 / 视频帧率)
-        :return: 
+        把连续特征序列切成 batch 份“逐帧特征窗口”。
+
+        常见用途：
+        - 当前循环要推理 batch_size 个视频帧，
+          那就为这 batch_size 个帧各切一份特征窗口。
+
+        参数说明：
+        - start: 这一批帧的起始视频索引（常取 stride_left_size/2 一类偏移）。
+        - audio_feat_win: 每个视频帧需要看多大左右音频上下文。
         """
         # 把长特征序列切成与视频帧对齐的小窗口。
         feature_chunks = []
