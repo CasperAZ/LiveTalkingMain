@@ -1,7 +1,6 @@
-# LiveTalkingMain + wav2lipls 最小接入说明（学习版）
+﻿# LiveTalkingMain + wav2lipls 最小接入说明（学习版）
 
-这个文件按你的“先能跑起来、再逐步优化”来写。  
-建议按顺序执行，避免参数和文件名错位。
+这个文件按“先能跑起来、再逐步优化”来写，建议按顺序执行，避免参数和文件名错位。
 
 ## 1) 放置权重文件
 
@@ -54,28 +53,3 @@ python app.py --transport webrtc --model wav2lipls --avatar_id wav2lipls_avatar1
 - `--model wav2lipls`：启用你刚加入的模型链路
 - `--avatar_id wav2lipls_avatar1`：与你生成素材目录一致
 - `--max_session 10`：并发会话上限（这个分支里常见的示例值）
-
----
-
-## 384 分辨率（可选）
-
-如果你想用高分辨率 ckpt（占显存更高，质量可能更细致）：
-
-```bash
-cp checkpoint_step002130000.pth ./models/
-python -m avatars.wav2lipls.genavatar_yolo \
-  --video_path xxx.mp4 \
-  --img_size 384 \
-  --avatar_id wav2lipls_avatar1
-
-python app.py --transport webrtc --model wav2lipls --modelres 384 --avatar_id wav2lipls_avatar1 --max_session 10
-```
-
----
-
-启动前自检（建议）：
-- `models/` 里有 ckpt 权重
-- `models/hubert-large-ls960-ft/` 目录存在
-- `data/avatars/wav2lipls_avatar1/` 下有 `full_imgs / face_imgs / coords.pkl`
-- `--modelres` 与前面 `genavatar_yolo` 的 `--img_size` 对齐，先统一为 192 或 384
-

@@ -55,6 +55,14 @@ from fractions import Fraction
 from utils.logger import logger
 from utils.image import read_imgs,mirror_index
 
+###############################################################################
+# 这份文件建议按“运行时总线”来看：  
+# - 输入层：收集文本/音频，交给 TTS 与 ASR；  
+# - 推理层：调用子类实现的模型推理；  
+# - 渲染层：把推理结果和素材合成一帧，走统一输出接口；  
+# - 输出层：按 transport 决定 webrtc/rtmp/virtualcam 的接收方。  
+###############################################################################
+
 # class State(Enum):
 #     INIT=0
 #     WAIT=1
@@ -63,6 +71,10 @@ from utils.image import read_imgs,mirror_index
 
 @dataclass
 class AudioFrameData:
+    # 一个 audio_frame = 1 个“音频小块”对应的标准结构（Go 可以理解为一个 struct）。
+    # - data: float32 音频样本数组  
+    # - type: 0 正常、1 静音、>1 自定义动作标签
+    # - userdata: 每块音频附带事件元数据，比如 {"status": "start"/"end"}
     # data:
     #   一个 20ms 左右的音频块，通常是 float32 单声道 PCM。
     # type:
@@ -92,6 +104,7 @@ class BaseAvatar:
     - 线程C: process_frames（后处理画面 + 音频/视频统一输出）
     """
     def __init__(self, opt):
+        # BaseAvatar 的关键职责：统一管理一个会话的音视频推理链路，而不绑定某一个具体模型。
         self.opt = opt
         # 音频采样率，单位 Hz。16000 表示每秒 16000 个采样点。
         self.sample_rate = 16000
@@ -99,6 +112,8 @@ class BaseAvatar:
         # chunk = sample_rate // (fps * 2)
         #
         # 设计动机：
+        # - 视频 1 帧时长大约对应 2 个音频块（默认 25fps -> 40ms/每帧）  
+        # - 这样 ASR 特征和口型推理天然对齐到视频帧节奏
         # - 默认 25fps 时，一个视频帧周期是 40ms；
         # - 系统按“1个视频帧对应2个音频块”推进；
         # - 所以每个音频块约 20ms -> 16k * 0.02 = 320 点。
@@ -116,6 +131,7 @@ class BaseAvatar:
         # 1 表示静音占位；
         # >1 表示某种业务自定义动作编号。
         self.custom_audiotype = 0 # 0: normal, 1: sinlence, >1: custom audio
+        # 对每种自定义动作，缓存图片序列/音频序列和播放进度索引，切换动作时只改状态机即可。
         self.custom_img_cycle = {}
         self.custom_audio_cycle = {}
         self.custom_audio_index = {}
@@ -125,10 +141,12 @@ class BaseAvatar:
 
         # 推理结果队列：线程B(inference) -> 线程C(process_frames) 的桥梁。
         # 队列元素结构：(pred_frame_or_none, [audio_frame_1, audio_frame_2], frame_idx)
+        # 结构里固定 2 个音频帧 = 1 个“画面时隙”，batch_size 决定一次处理批次大小。
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
 
+        # TTS 插件映射：通过 registry 反射装配，可在配置里切换，不改会话主逻辑。
         _tts_modules = {
             'edgetts': 'tts.edge',
             'gpt-sovits': 'tts.sovits',
@@ -149,6 +167,7 @@ class BaseAvatar:
         else:
             logger.error(f"TTS module {opt.tts} not found.")
 
+        # 输出插件映射：把“推送方式”从配置里解耦，不同 transport 走不同实现。
         _output_modules = {
             'webrtc': 'streamout.webrtc',
             'rtcpush': 'streamout.webrtc',
@@ -169,16 +188,19 @@ class BaseAvatar:
 
     # 统一的“喂文本”入口。
     # 外部通常不需要知道底层是如何经过 TTS / ASR / 推理的。
+    # put_msg_txt: 文本入口，驱动 TTS 产出音频帧；上层不需要关心后续走哪种 TTS。
     def put_msg_txt(self, msg, datainfo:dict={}):
         if hasattr(self, 'tts'):
             self.tts.put_msg_txt(msg, datainfo)
     
+    # put_audio_frame: 外部任意来源的音频块入口（16kHz、float32，通常 20ms）。
     def put_audio_frame(self, audio_chunk:NDArray[np.float32], datainfo:dict={}): # 16khz 20ms pcm
         # 统一的“喂音频块”入口。
         # 不管音频来自 TTS、上传文件还是自定义动作，最后都走这里。
         if hasattr(self, 'asr'):
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
+    # put_audio_file: 上传文件字节数组 -> decode -> 分块 -> 入 ASR。
     def put_audio_file(self, filebyte, datainfo:dict={}): 
         # 上传整段音频文件时，流程是：
         # 文件字节 -> 解码成波形 -> 重采样/归一化 -> 按 chunk 切块 -> 逐块入队。
@@ -199,6 +221,7 @@ class BaseAvatar:
             streamlen -= self.chunk
             idx += self.chunk
 
+    # put_audio_filepath: 按文件路径读取同上，不必先手动转成 bytes。
     def put_audio_filepath(self, filepath, datainfo:dict={}): 
         # 与 put_audio_file 逻辑相同，只是输入改成了文件路径。
         stream = self.__create_bytes_stream(filepath)
@@ -217,6 +240,7 @@ class BaseAvatar:
             streamlen -= self.chunk
             idx += self.chunk
     
+    # 统一音频预处理：decode + 单声道 + 重采样，返回 float32 ndarray。
     def __create_bytes_stream(self, byte_stream):
         # 标准化音频输入规格：
         # - 统一转成 float32
@@ -236,6 +260,7 @@ class BaseAvatar:
 
         return stream
 
+    # flush_talk: 打断当前会话片段，清掉未播/未推队列，重置动作状态。
     def flush_talk(self):
         # 打断说话时，需要同时清掉：
         # 1. TTS 还没合成的文本；
@@ -253,6 +278,7 @@ class BaseAvatar:
     def is_speaking(self) -> bool:
         return self.speaking
     
+    # __loadcustom: 加载配置里的 customopt（动作分支）资源索引。
     def __loadcustom(self):
         if not hasattr(self.opt, 'customopt') or not self.opt.customopt:
             return
@@ -274,6 +300,7 @@ class BaseAvatar:
             self.custom_index[item['audiotype']] = 0
             # self.custom_opt[item['audiotype']] = item
 
+    # init_customindex: 每次会话启动或重置动作时，把自定义序列索引归零。
     def init_customindex(self):
         self.custom_audiotype = 0
         for key in self.custom_audio_index:
@@ -281,12 +308,14 @@ class BaseAvatar:
         for key in self.custom_index:
             self.custom_index[key] = 0
 
+    # notify: 当前主要处理 frame event 的状态点（start/end），便于日志和埋点。
     def notify(self, eventpoint:dict):
         # 这里可以理解成“音频事件同步点”。
         # 当前只是打日志，但很适合后续扩展成字幕、状态回调、平台通知等。
         if eventpoint and eventpoint.get('status'):
             logger.info("notify:%s", eventpoint)
 
+    # start_recording: 调试能力，启动本地 ffmpeg 管道记录 raw 音/视频。
     def start_recording(self):
         # 录制功能是通过两个 ffmpeg 进程分别写视频裸流和音频裸流实现的。
         if self.recording:
@@ -345,6 +374,7 @@ class BaseAvatar:
     #     else:
     #         return size - res - 1 
     
+    # get_custom_audio_stream: 为某个自定义动作取一段 chunk 音频并推进指针。
     def get_custom_audio_stream(self, audiotype):
         # 每次只取出一个 chunk 长度的音频，保证自定义动作也遵守同一节拍。
         idx = self.custom_audio_index[audiotype]
@@ -354,6 +384,7 @@ class BaseAvatar:
             self.custom_audiotype = 1
         return stream
     
+    # set_custom_state: 动作编排入口，切换到指定 audiotype 并可重置播放进度。
     def set_custom_state(self, audiotype, reinit=True):
         print('set_custom_state:', audiotype)
         if self.custom_audio_index.get(audiotype) is None:
@@ -365,11 +396,13 @@ class BaseAvatar:
             self.custom_index[audiotype] = 0
 
     # ========================== 核心渲染及 Pipeline 桥接 ==========================
+    # get_avatar_length: 兼容不同 avatar 素材，没有循环素材时给 1 防止除零/越界。
     def get_avatar_length(self):
         if hasattr(self, 'frame_list_cycle'):
             return len(self.frame_list_cycle)
         return 1
         
+    # inference: 后台推理线程。取 ASR 特征 + 音频帧对，生成推理结果写入 res_frame_queue。
     def inference(self, quit_event):
         # 这个线程负责“音频特征 -> 口型推理结果”。
         length = self.get_avatar_length()
@@ -437,6 +470,7 @@ class BaseAvatar:
                 last_speaking = current_speaking         
         logger.info('baseavatar inference thread stop')
 
+    # process_frames: 消费推理队列，把音画数据同步到 output（webrtc/rtmp/virtualcam）。
     def process_frames(self,quit_event):
         # 这个线程负责把推理结果做成“最终可播放的完整画面”，然后送去输出层。
         enable_transition = False  # 设置为False禁用过渡效果，True启用
@@ -526,6 +560,7 @@ class BaseAvatar:
         self.output.stop()
         logger.info('baseavatar process_frames thread stop') 
 
+    # render: 会话启动入口；启动 TTS、inference、process_frames 三条执行链并做背压控制。
     def render(self,quit_event):
         # render 是会话真正启动的入口，会同时拉起：
         # - TTS 线程

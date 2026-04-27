@@ -28,9 +28,14 @@ from av import AudioFrame
 import fractions
 import numpy as np
 
-AUDIO_PTIME = 0.020  # 20ms audio packetization
-VIDEO_CLOCK_RATE = 90000
-VIDEO_PTIME = 0.040 #1 / 25  # 30fps
+"""
+这里是流媒体时间戳桥接层。
+BaseAvatar 产出的是逻辑帧，aiortc 需要的是带时间基的媒体帧；
+这层负责把队列中的逻辑帧转成 WebRTC 可推帧，并按时间戳推进。
+"""
+AUDIO_PTIME = 0.020  # 20ms 一个音频包
+VIDEO_CLOCK_RATE = 90000  # RTP 时钟基准
+VIDEO_PTIME = 0.040  # 1/25 秒（默认 25fps）
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 SAMPLE_RATE = 16000
 AUDIO_TIME_BASE = fractions.Fraction(1, SAMPLE_RATE)
@@ -55,7 +60,10 @@ from utils.logger import logger as mylogger
 # 上游是项目自己的渲染队列，下游是 WebRTC 浏览器播放器，中间靠这里做桥接。
 class PlayerStreamTrack(MediaStreamTrack):
     """
-    A video track that returns an animated flag.
+    通用媒体 track：
+    - 将 avatar 的帧从队列取出
+    - 计算并设置 pts/time_base
+    - 输出给 aiortc
     """
 
     def __init__(self, player, kind):
@@ -74,6 +82,10 @@ class PlayerStreamTrack(MediaStreamTrack):
     _timestamp: int
 
     async def next_timestamp(self) -> Tuple[int, fractions.Fraction]:
+        """
+        按 kind 推进时间戳：video 40ms 一帧，audio 20ms 一包。
+        如果发送过快，会简单 sleep 到目标 wall clock 时间。
+        """
         if self.readyState != "live":
             raise Exception
 
@@ -117,6 +129,7 @@ class PlayerStreamTrack(MediaStreamTrack):
 
     async def recv(self) -> Union[Frame, Packet]:
         # aiortc 需要一帧媒体数据时会调用这里。
+        # 推流消费者：第一次 recv 时启动后台 worker，持续从 BaseAvatar output 拉帧。
         self._player._start(self)
         # if self.kind == 'video':
         #     frame = await self._queue.get()
@@ -139,6 +152,7 @@ class PlayerStreamTrack(MediaStreamTrack):
                 break
             except queue.Empty:
                 # 队列暂时没数据时短暂休眠，避免 CPU 空转。
+                # 队列为空时，短暂等待避免 CPU 空转。
                 await asyncio.sleep(0.005)
                 
         pts, time_base = await self.next_timestamp()
@@ -198,11 +212,13 @@ class HumanPlayer:
             self.__container.output._player = self
 
     def push_video(self, frame):
+        """把 BGR ndarray 转成 av.VideoFrame 并放进视频队列。"""
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
         self.__video._queue.put((new_frame, None))
 
     def push_audio(self, frame, eventpoint=None):
+        """把 int16 PCM 转成 av.AudioFrame 并放进音频队列。"""
         from av import AudioFrame
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
         new_frame.planes[0].update(frame.tobytes())

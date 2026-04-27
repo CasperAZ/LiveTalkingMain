@@ -1,64 +1,49 @@
 ###############################################################################
-#  WebRTC 连接管理 + RTC 音频/视频接收
+# WebRTC 会话管理（PeerConnection 的创建与收口）
+#
+# 这层和 Go 的 signaling handler 类似：
+# - 收到客户端 offer
+# - 创建 RTCPeerConnection
+# - 绑定音频/视频 track
+# - 生成 answer / 透传给客户端
 ###############################################################################
 
-import json
 import asyncio
-import random
 import copy
+import json
 from typing import Dict, Optional
-import queue
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceServer, RTCConfiguration
 from aiortc.rtcrtpsender import RTCRtpSender
 
 from utils.logger import logger
-
-
-# def _rand_session_id(n: int = 6) -> int:
-#     """生成 N 位随机 session ID"""
-#     return random.randint(10 ** (n - 1), 10 ** n - 1)
-
-
 from server.session_manager import session_manager
+
 
 class RTCManager:
     """
-    WebRTC 连接管理器。
-    
-    管理 PeerConnection 生命周期、音视频轨道收发、DataChannel。
+    管理当前进程里的 WebRTC 连接（pc 集合）以及 offer/push 两种入口。
     """
 
     def __init__(self, opt):
-        """
-        Args:
-            opt: 全局配置
-        """
         self.opt = opt
         self.pcs: set = set()
 
     async def handle_offer(self, request):
-        """处理 WebRTC offer 信令"""
+        """
+        典型 webrtc 推流入口（前端 -> /offer）。
+        返回 answer + sessionid。
+        """
         params = await request.json()
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-        if False: # 不再由 RTCManager 控制 max_session，让业务逻辑或SessionManager 控制
-            logger.info('reach max session')
-            return web.Response(
-                content_type="application/json",
-                text=json.dumps({"code": -1, "msg": "reach max session"}),
-            )
-
-        #sessionid = _rand_session_id()
-
-        # WebRTC 连接建立时，同时创建一个新的数字人会话。
-        # 可以把一个 session 理解成“一路独立的数字人服务实例”。
+        # 预留位：可在这里加 max_session 限流。当前默认走 session_manager 限制/外部限制。
         sessionid = await session_manager.create_session(params)
         logger.info('offer sessionid=%s', sessionid)
         avatar_session = session_manager.get_session(sessionid)
 
-        # 创建 PeerConnection，后续浏览器就是通过它接收音视频。
+        # 建立 pc + STUN 地址
         ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=[ice_server])
@@ -69,20 +54,18 @@ class RTCManager:
         async def on_connectionstatechange():
             logger.info("Connection state is %s", pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
-                # 浏览器断开后，把会话一并清理掉，避免后台线程空跑。
+                # 连接失败/关闭时，清理 pc 并移除会话
                 await pc.close()
                 self.pcs.discard(pc)
                 session_manager.remove_session(sessionid)
 
-        # 添加发送轨道。
-        # 注意：这里不是接摄像头，而是接数字人渲染器 HumanPlayer。
+        # 用 HumanPlayer 把 avatar 的 output 封装成 aiortc tracks
         from server.webrtc import HumanPlayer
         player = HumanPlayer(avatar_session)
         pc.addTrack(player.audio)
         pc.addTrack(player.video)
 
-        # 设置视频编解码器优先级。
-        # H264 一般兼容性最好，VP8 作为兜底。
+        # 优先选 h264（可用时），再兜底 VP8/rtx
         capabilities = RTCRtpSender.getCapabilities("video")
         preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
         preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
@@ -91,7 +74,6 @@ class RTCManager:
         transceiver.setCodecPreferences(preferences)
 
         await pc.setRemoteDescription(offer)
-
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
@@ -105,9 +87,13 @@ class RTCManager:
         )
 
     async def handle_rtcpush(self, push_url, sessionid: str):
-        """RTCPush 模式：主动推流"""
+        """
+        RTCPush 出口（主动发起 offer 给平台推流端）。
+        这里同样创建 pc，但是由服务端先呼叫目标 URL。
+        """
         import aiohttp
-        # 这里与 handle_offer 相反，不是等待浏览器来连，而是我们主动把流推给远端。
+
+        # 与 handle_offer 区别：这里没有“客户端 offer”，只构造服务端 offer 并等待 answer。
         await session_manager.create_session({}, sessionid)
         avatar_session = session_manager.get_session(sessionid)
 
@@ -128,6 +114,7 @@ class RTCManager:
 
         await pc.setLocalDescription(await pc.createOffer())
 
+        # 向第三方推流服务发布本地 SDP，拿到 answer 后回填
         async with aiohttp.ClientSession() as session:
             async with session.post(push_url, data=pc.localDescription.sdp) as response:
                 answer_sdp = await response.text()
@@ -137,8 +124,8 @@ class RTCManager:
         )
 
     async def shutdown(self):
-        """关闭所有 PeerConnection"""
-        # 服务退出时统一关闭全部 RTC 连接。
+        """服务关闭时，统一关闭已有 pc 连接。"""
         coros = [pc.close() for pc in self.pcs]
         await asyncio.gather(*coros)
         self.pcs.clear()
+

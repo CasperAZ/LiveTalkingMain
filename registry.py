@@ -1,13 +1,13 @@
 ###############################################################################
-#  插件注册表
+# 注册中心（Registry）
 #
-#  这是项目实现“可插拔架构”的关键文件。
-#  可以把它理解成一个简化版插件工厂：
-#  - `@register(...)` 负责登记“名字 -> 类”
-#  - `create(...)` 负责按名字创建实例
+# 作用：把“模块名 -> 实现类”注册到全局表，运行时按名字创建实例。
+# 这在项目里用得很广，比如：
+# - avatar 插件：musetalk / wav2lip / ultralight / wav2lipls
+# - tts 插件：edgetts / qwen tts / ... 等
+# - output 插件：webrtc / rtmp / virtualcam
 #
-#  这也是你后续扩展平台能力时最值得保留的设计之一：
-#  新增一个 TTS、一个输出器、甚至一个新数字人模型，不需要大改主流程。
+# 设计动机：解耦依赖。你新增插件时只改配置，不改主业务流程。
 ###############################################################################
 
 from typing import Dict, Type, Any
@@ -24,47 +24,53 @@ _REGISTRY: Dict[str, Dict[str, Type]] = {
 
 def register(category: str, name: str):
     """
-    装饰器：注册插件类到全局注册表。
+    注册装饰器。
 
-    用法::
+    使用方式：
 
-        @register("tts", "edgetts")
-        class EdgeTTS(BaseTTS): ...
+    @register("tts", "edgetts")
+    class EdgeTTS(BaseTTS): ...
+
+    运行后会记录到 _REGISTRY["tts"]["edgetts"]。
     """
     def decorator(cls):
-        # category 例如 tts / avatar / output。
-        # name 是配置里真正填写的插件名。
+        # category 例如：tts / avatar / output
+        # name 是业务层统一使用的字符串键，例如 "webrtc"、"wav2lip"。
         if category not in _REGISTRY:
             _REGISTRY[category] = {}
         _REGISTRY[category][name] = cls
         logger.info(f"Registered {category}/{name}: {cls.__name__}")
         return cls
+
     return decorator
 
 
 def create(category: str, name: str, **kwargs) -> Any:
     """
-    按名称创建插件实例。
+    按类别和名称创建实例。
 
-    Usage::
-
-        tts = registry.create("tts", "edgetts", opt=opt)
+    - category：要创建的分组（"tts"/"avatar"/"output"...）
+    - name：映射键（"edgetts"、"wav2lip"、"webrtc"...）
+    - kwargs：透传给构造函数（通常是 opt / parent / model 等）
     """
-    # 如果这里报“Plugin not found”，常见原因有两个：
-    # 1. 对应模块还没 import，装饰器还没执行；
-    # 2. 配置名和 @register 里的名字不一致。
+    # 常见失败原因：
+    # 1) 没 import 到对应模块（类未注册）
+    # 2) 类名写错，和 register 的 name 不一致
     if category not in _REGISTRY or name not in _REGISTRY[category]:
         available = list(_REGISTRY.get(category, {}).keys())
         raise ValueError(
             f"Plugin '{name}' not found in category '{category}'. "
             f"Available: {available}"
         )
+
     cls = _REGISTRY[category][name]
     return cls(**kwargs)
 
 
 def list_plugins(category: str = None) -> Dict[str, list]:
-    """列出已注册的插件"""
+    """
+    查询当前注册表。用于调试或管理后台展示可用插件。
+    """
     if category:
         return {category: list(_REGISTRY.get(category, {}).keys())}
     return {cat: list(plugins.keys()) for cat, plugins in _REGISTRY.items()}
