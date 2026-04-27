@@ -48,14 +48,49 @@ def parse_args():
     # parser.add_argument('--H', type=int, default=450, help="GUI height")
 
     # ─── 数字人模型参数 ────────────────────────────────────────────────
-    # model 决定走哪套口型推理链路。
-    # avatar_id 对应 data/avatars/ 下的一套素材目录。
+    # 这一组参数控制“选哪个模型 + 选哪套素材 + 推理吞吐/预热行为”。
+    # 对入门同学可以先这样理解：
+    # 1) model：决定主推理链路（musetalk / wav2lip / ultralight）。
+    # 2) avatar_id：决定从 data/avatars/<avatar_id>/ 读取哪套人物素材。
+    # 3) batch_size：决定一次并行推理多少帧（吞吐和显存占用强相关）。
+    # 4) modelres / modelfile：属于“可配置入口参数”，但当前主流程中尚未完全接线。
+    #
+    # model（模型类型）
+    # - musetalk：通常口型更自然，但链路更重，对显存/算力要求更高。
+    # - wav2lip：工程成熟度高、兼容性好，很多场景优先用它。
+    # - ultralight：资源占用更轻，适合算力有限场景。
+    # 注意：这里只是“选择代码分支”，真正能否跑通还取决于对应模型权重和 avatar 资源是否齐全。
     parser.add_argument('--model', type=str, default='wav2lip',
                         help="avatar model: musetalk/wav2lip/ultralight")
+
+    # avatar_id（素材目录 ID）
+    # - 例如默认值 wav2lip256_avatar1，对应目录：data/avatars/wav2lip256_avatar1/
+    # - 目录里一般包含 full_imgs / face_imgs / coords.pkl（不同模型会有少量差异）
+    # - 如果 avatar_id 写错、目录缺文件，启动后通常会在加载头像阶段报错。
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
                         help="avatar id in data/avatars")
+
+    # batch_size（推理批大小）
+    # - 含义：一次送进模型并行处理的样本数（通常可理解为“并行帧数”）。
+    # - 默认 16：在速度与显存之间做的折中。
+    # - 调大：吞吐可能更高，但显存压力上升，可能 OOM（显存不足）。
+    # - 调小：更稳、更省显存，但吞吐下降，端到端延迟可能上升。
+    # - 实操建议：先从 8/16 起步，再按显存余量逐步上调。
     parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
+
+    # modelres（模型分辨率参数，当前版本主流程未完整使用）
+    # - 设计意图：控制模型输入/预热时使用的分辨率（常见是方形边长，如 160/192/256）。
+    # - 现实状态：当前 app 主流程里 warm_up 分辨率是按模型分支写死的（例如 wav2lip=256），
+    #   不是直接读取这个参数；所以你改这里，通常不会立即改变实际推理分辨率行为。
+    # - 保留原因：便于后续把分辨率配置“接线”到统一入口。
     parser.add_argument('--modelres', type=int, default=192)
+
+    # modelfile（自定义模型权重路径，当前版本主流程未完整使用）
+    # - 设计意图：允许通过命令行指定权重文件，例如：
+    #   --modelfile ./models/your_wav2lip.pth
+    # - 现实状态：当前主流程（尤其 wav2lip 分支）仍使用固定路径加载权重，
+    #   因此这个参数现在更像“预留扩展位”。
+    # - 对学习阶段的建议：先用项目默认权重跑通，再考虑把该参数接入主流程。
     parser.add_argument('--modelfile', type=str, default='')
 
     # ─── 自定义动作/静默动画配置 ───────────────────────────────────────

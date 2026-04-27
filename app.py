@@ -165,32 +165,53 @@ def main():
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size,global_avatars[opt.avatar_id],160)
 
-    # 把“如何创建会话”的工厂函数交给 SessionManager。
-    # 以后即使不是 WebRTC 场景，只要要创建一个数字人会话，也能复用这条入口。
+    # ─── 会话装配入口 ────────────────────────────────────────────────────
+    # 这里把“创建一个数字人会话”的方法（build_avatar_session）注册给 SessionManager。
+    # 可以把它理解为“会话工厂注册”：
+    # - SessionManager 负责管理会话生命周期（创建、查询、移除）；
+    # - 但具体怎么创建会话实例，由这个工厂函数决定。
+    # 这样做的好处是：后面不管是 WebRTC、RTMP、virtualcam，还是其它接入方式，
+    # 只要需要会话，都会走同一条创建逻辑，避免每种传输方式各写一份。
     session_manager.init_builder(build_avatar_session)
+    # RTCManager 负责 WebRTC 连接管理（offer/answer、PeerConnection 生命周期等）。
+    # 注意：它管理的是“连接”，不是“模型推理本身”。
     rtc_manager = RTCManager(opt)
     
+    # ─── 非 WebRTC 模式的会话启动 ──────────────────────────────────────
+    # virtualcam / rtmp 场景下，没有浏览器去触发 /offer，
+    # 所以不会自动创建会话。这里手工创建一个固定会话 '0' 并启动渲染线程。
+    # 你可以理解成“服务端自启动一个无人值守会话”。
     if opt.transport=='virtualcam' or opt.transport=='rtmp':
+        # thread_quit 用来通知渲染线程停止（当前主流程里常驻运行，通常不主动置位）。
         thread_quit = Event()
+        # 预留参数字典：如果后续要给 session 0 注入特定配置，可从这里传。
         params = {}
-        # virtualcam / rtmp 模式没有浏览器来触发会话创建，
-        # 所以这里手工创建一个固定 session 0，并直接启动渲染线程。
         session_manager.add_session('0', build_avatar_session('0', params))
+        # render() 是 Avatar 会话内部的主循环（TTS/ASR/推理/输出联动）。
         rendthrd = Thread(target=session_manager.get_session('0').render,args=(thread_quit,))
         rendthrd.start()
 
     #############################################################################
+    # ─── aiohttp 应用层初始化 ────────────────────────────────────────────
+    # 这里是“网络控制面”应用，不是推理线程。主要负责 API 接口、WebRTC 信令等。
+    # client_max_size=100MB：允许较大的上传请求（例如音频文件上传场景）。
     appasync = web.Application(client_max_size=1024**2*100)
+    # 把 llm_response 函数挂到 app 上，路由处理器会从 app 中取出并调用。
+    # 这样做可以减少全局变量耦合，路由层更容易测试和替换。
     appasync["llm_response"] = llm_response
 
+    # 服务关闭时统一执行 on_shutdown，回收 RTC 连接等资源。
     appasync.on_shutdown.append(on_shutdown)
+    # WebRTC 信令入口：浏览器/客户端通过 /offer 发起会话协商。
     appasync.router.add_post("/offer", offer)
     
-    # 注册所有通用业务接口。
-    # 对外部平台适配来说，这里相当于项目的“控制面 API”。
+    # 注册业务 API（/human、/humanaudio、/interrupt_talk 等）。
+    # 对外部平台适配来说，这里相当于“控制面接口层”。
     setup_routes(appasync) 
 
-    # Configure default CORS settings.
+    # ─── CORS 配置 ──────────────────────────────────────────────────────
+    # 允许跨域调用这些接口，方便浏览器前端或其它域名下的控制面访问。
+    # 当前配置是较宽松的“全开放”策略（生产环境可按需收紧来源域名）。
     cors = aiohttp_cors.setup(appasync, defaults={
             "*": aiohttp_cors.ResourceOptions(
                 allow_credentials=True,
@@ -198,10 +219,12 @@ def main():
                 allow_headers="*",
             )
         })
-    # Configure CORS on all routes.
+    # 把 CORS 规则应用到当前 app 的所有路由。
     for route in list(appasync.router.routes()):
         cors.add(route)
 
+    # ─── 启动信息展示 ────────────────────────────────────────────────────
+    # 根据 transport 选择推荐访问的页面，方便本地调试时直接打开对应前端。
     pagename='webrtcapi.html'
     if opt.transport=='rtmp':
         pagename='rtmpapi.html'
@@ -209,23 +232,33 @@ def main():
         pagename='rtcpushapi.html'
     logger.info('start http server; http://<serverip>:'+str(opt.listenport)+'/'+pagename)
     logger.info('如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:'+str(opt.listenport)+'/dashboard.html')
+
+    # ─── 网络服务主循环 ──────────────────────────────────────────────────
+    # 这里显式创建一个独立事件循环，和推理线程分离，避免互相阻塞。
+    # 核心思想：网络 I/O 归 asyncio 管，模型推理归渲染线程管。
     def run_server(runner):
-        # 单独创建事件循环，避免和模型线程、推流线程混在一起。
-        # 这是这个项目把“异步网络层”和“同步推理层”拼在一起的关键做法之一。
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        # 1) 初始化 runner（注册路由、准备站点）
         loop.run_until_complete(runner.setup())
+        # 2) 绑定监听地址与端口
         site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
+        # 3) 启动 HTTP 服务
         loop.run_until_complete(site.start())
         if opt.transport=='rtcpush':
-            # rtcpush 模式下，服务端会主动向远端 RTC 地址发起推流。
+            # rtcpush 模式下，服务端主动向远端 WHIP/RTC 地址发起推流。
+            # max_session 控制发起几路推流；第 0 路用原始 push_url，
+            # 后续路数在末尾拼接序号（例如 ...livestream1、...livestream2）。
             for k in range(opt.max_session):
                 push_url = opt.push_url
                 if k!=0:
                     push_url = opt.push_url+str(k)
                 loop.run_until_complete(rtc_manager.handle_rtcpush(push_url, str(k)))
+        # 4) 常驻事件循环，持续响应 API / WebRTC 信令
         loop.run_forever()    
     #Thread(target=run_server, args=(web.AppRunner(appasync),)).start()
+    # 当前实现直接在主线程运行 run_server（阻塞式常驻）。
+    # 上面注释掉的是“另起线程跑服务”的旧尝试。
     run_server(web.AppRunner(appasync))
 
     #app.on_shutdown.append(on_shutdown)
@@ -239,6 +272,8 @@ def main():
 # os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 # os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'                                                    
 if __name__ == '__main__':
+    # Windows/macOS 上使用 spawn 更稳妥，能避免 fork 带来的某些资源继承问题。
+    # 必须放在入口保护里调用，避免子进程重复执行入口逻辑。
     mp.set_start_method('spawn')
     main()
     
