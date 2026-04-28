@@ -55,6 +55,8 @@ logging.basicConfig()
 logger = logging.getLogger(__name__)
 from utils.logger import logger as mylogger
 
+# 学习注释：`logger` 是标准库日志实例，`mylogger` 是项目里的统一日志封装。
+
 # 这个模块的作用是把“数字人内部生产出的音视频帧”包装成 aiortc 能识别的媒体轨。
 # 你可以把它理解成：
 # 上游是项目自己的渲染队列，下游是 WebRTC 浏览器播放器，中间靠这里做桥接。
@@ -68,8 +70,11 @@ class PlayerStreamTrack(MediaStreamTrack):
 
     def __init__(self, player, kind):
         super().__init__()  # don't forget this!
+        # 学习注释：每个 Track 只服务一种类型（音频或视频），并按各自节奏管理时间戳。
         self.kind = kind
+        # 学习注释：保留 player 引用，后续回调可通过它转发控制/通知/事件信息。
         self._player = player
+        # 学习注释：固定长度队列把“生产者线程”和“消费端协程”解耦，防止无限堆积。
         self._queue = queue.Queue(maxsize=100)
         self.timelist = [] #记录最近包的时间戳
         self.current_frame_count = 0
@@ -86,6 +91,8 @@ class PlayerStreamTrack(MediaStreamTrack):
         按 kind 推进时间戳：video 40ms 一帧，audio 20ms 一包。
         如果发送过快，会简单 sleep 到目标 wall clock 时间。
         """
+        # 学习注释：aiortc 要求每个输出帧都带 pts 与 time_base。
+        # 固定步长推进是低延迟流式播放里常见的节奏控制方式。
         if self.readyState != "live":
             raise Exception
 
@@ -130,6 +137,7 @@ class PlayerStreamTrack(MediaStreamTrack):
     async def recv(self) -> Union[Frame, Packet]:
         # aiortc 需要一帧媒体数据时会调用这里。
         # 推流消费者：第一次 recv 时启动后台 worker，持续从 BaseAvatar output 拉帧。
+        # 学习注释：aiortc 会反复调用这个协程，每次取一帧并把时间戳信息补齐后返回。
         self._player._start(self)
         # if self.kind == 'video':
         #     frame = await self._queue.get()
@@ -150,6 +158,8 @@ class PlayerStreamTrack(MediaStreamTrack):
             try:
                 frame, eventpoint = self._queue.get_nowait()
                 break
+            # 学习注释：queue.Empty 表示本轮还没新包入队。
+            # 短暂 sleep 5ms，避免空转导致 CPU 占满。
             except queue.Empty:
                 # 队列暂时没数据时短暂休眠，避免 CPU 空转。
                 # 队列为空时，短暂等待避免 CPU 空转。
@@ -161,6 +171,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         if eventpoint and self._player is not None:
             # 音频事件（开始/结束/文本等）随帧同步回上层。
             self._player.notify(eventpoint)
+        # 学习注释：eventpoint 跟随当前帧时钟同步，动作回调可按播放时间线对齐。
         if frame is None:
             self.stop()
             raise Exception
@@ -175,6 +186,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         return frame
     
     def stop(self):
+        # 学习注释：停止 Track 生命周期并清空已缓存帧，避免停流后继续泄漏播放。
         super().stop()
         # Drain & delete remaining frames
         while not self._queue.empty():
@@ -188,6 +200,7 @@ def player_worker_thread(
     quit_event,
     container
 ):
+    # 学习注释：这是独立渲染线程入口，负责持续调用 container.render。
     container.render(quit_event)
 
 class HumanPlayer:
@@ -195,6 +208,8 @@ class HumanPlayer:
     def __init__(
         self, avatar_session, format=None, options=None, timeout=None, loop=False, decode=True
     ):
+        # 学习注释：这个类负责包装两个媒体轨道（音频/视频），
+        # 并把渲染出的帧喂给 aiortc。
         self.__thread: Optional[threading.Thread] = None
         self.__thread_quit: Optional[threading.Event] = None
 
@@ -212,12 +227,14 @@ class HumanPlayer:
             self.__container.output._player = self
 
     def push_video(self, frame):
+        # 学习注释：渲染线程调用此方法，把一帧图像入队给 WebRTC 发送。
         """把 BGR ndarray 转成 av.VideoFrame 并放进视频队列。"""
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
         self.__video._queue.put((new_frame, None))
 
     def push_audio(self, frame, eventpoint=None):
+        # 学习注释：将 int16 PCM 音频片段和可选事件点一起入队，和音画同步。
         """把 int16 PCM 转成 av.AudioFrame 并放进音频队列。"""
         from av import AudioFrame
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
@@ -226,9 +243,11 @@ class HumanPlayer:
         self.__audio._queue.put((new_frame, eventpoint))
 
     def get_buffer_size(self) -> int:
+        # 学习注释：输出队列长度监控指标，便于观察是否有卡顿堆积。
         return self.__video._queue.qsize()
 
     def notify(self,eventpoint):
+        # 学习注释：只在容器存在时转发事件，避免销毁后空指针访问。
         if self.__container is not None:
             self.__container.notify(eventpoint)
 
@@ -247,6 +266,7 @@ class HumanPlayer:
         return self.__video
 
     def _start(self, track: PlayerStreamTrack) -> None:
+        # 学习注释：惰性启动。仅当第一条轨道订阅时才创建渲染线程。
         self.__started.add(track)
         if self.__thread is None:
             self.__log_debug("Starting worker thread")
@@ -263,6 +283,7 @@ class HumanPlayer:
             self.__thread.start()
 
     def _stop(self, track: PlayerStreamTrack) -> None:
+        # 学习注释：当没有活动轨道时关闭渲染线程，并释放容器引用。
         self.__started.discard(track)
 
         if not self.__started and self.__thread is not None:
