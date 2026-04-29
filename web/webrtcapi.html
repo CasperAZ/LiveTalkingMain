@@ -23,6 +23,28 @@
         margin-bottom: 8px;
     }
 
+    .mode-group {
+        margin: 12px 0 8px;
+    }
+
+    .mode-group label {
+        margin-right: 16px;
+    }
+
+    .llm-settings {
+        margin: 10px 0;
+    }
+
+    .llm-settings label {
+        display: block;
+        margin: 8px 0 4px;
+    }
+
+    .llm-settings textarea {
+        width: 600px;
+        min-height: 70px;
+    }
+
     #media {
         max-width: 1280px;
     }
@@ -43,6 +65,25 @@
 <form class="form-inline" id="echo-form">
     <div class="form-group">
       <p>input text</p>
+      <div class="mode-group">
+        <span>mode: </span>
+        <label>
+            <input type="radio" name="request-type" value="echo" checked>
+            echo 直接播报
+        </label>
+        <label>
+            <input type="radio" name="request-type" value="chat">
+            chat 本地大模型回复
+        </label>
+      </div>
+
+      <div class="llm-settings">
+        <label for="persona-prompt">persona 人设</label>
+        <textarea class="form-control" id="persona-prompt">人设：你叫林晚，是一个专业但不油腻的中文直播主播。你的表达自然、有亲和力，擅长把产品优势讲得具体可信。回答观众问题时不要夸大承诺，不说绝对化用语，不输出动作描述、表情符号或 Markdown，只输出适合数字人直接口播的话。</textarea>
+
+        <label for="live-context">live context 当前口播/产品上下文</label>
+        <textarea class="form-control" id="live-context">当前直播内容：正在介绍一款家用空气炸锅，主打少油烹饪、操作简单、容量适合三口之家、日常做鸡翅薯条和加热半成品比较方便。当前优惠价 299 元，强调理性下单和适合真实日常使用，不承诺治疗、减肥、绝对安全或永久耐用。</textarea>
+      </div>
 
       <textarea cols="2" rows="3" style="width:600px;height:50px;" class="form-control" id="message">test</textarea>
     </div>
@@ -84,15 +125,24 @@
 	  $('#echo-form').on('submit', function(e) {
       e.preventDefault();
       var message = $('#message').val();
+      var requestType = $('input[name="request-type"]:checked').val() || 'echo';
+      var payload = {
+          text: message,
+          type: requestType,
+          interrupt: true,
+          sessionid: String(document.getElementById('sessionid').value),
+      };
+      if (requestType === 'chat') {
+          payload.llm = {
+              persona: $('#persona-prompt').val(),
+              context: $('#live-context').val(),
+          };
+      }
       console.log('Sending: ' + message);
+      console.log('type: ', requestType);
       console.log('sessionid: ',document.getElementById('sessionid').value);
       fetch('/human', {
-            body: JSON.stringify({
-                text: message,
-                type: 'echo',
-                interrupt: true,
-                sessionid: String(document.getElementById('sessionid').value),
-            }),
+            body: JSON.stringify(payload),
             headers: {
                 'Content-Type': 'application/json'
             },

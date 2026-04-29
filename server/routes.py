@@ -82,6 +82,10 @@ async def human(request):
         if params.get('tts'):
             # datainfo 会被透传到 TTS 模块（用于 voice/emotion 等扩展）
             datainfo['tts'] = params.get('tts')
+        if params.get('llm'):
+            # 预留给直播人设/当前口播内容/商品上下文等 LLM 编排信息。
+            # 示例：{"llm": {"persona": "...", "context": "..."}}
+            datainfo['llm'] = params.get('llm')
 
         # echo：把文本直接当字幕/一句话输入
         if params['type'] == 'echo':
@@ -213,4 +217,3 @@ def setup_routes(app):
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_static('/', path='web')
-
